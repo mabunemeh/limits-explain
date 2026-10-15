@@ -1,0 +1,4 @@
+Limit                     Soft Limit           Hard Limit           Units
+Max cpu time              unlimited            unlimited            seconds
+Max open files            1024                 1048576              files
+Max flux capacitors       10                   20                   gigawatts

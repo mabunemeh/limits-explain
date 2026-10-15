@@ -1,0 +1,5 @@
+Limit                     Soft Limit           Hard Limit           Units
+Max cpu time              unlimited            unlimited            seconds
+Max stack size            8388608              8388608              bytes
+Max processes             4096                 4096                 processes
+Max open files            1024                 1024                 files

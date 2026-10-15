@@ -1,0 +1,6 @@
+Limit                     Soft Limit           Hard Limit           Units
+Max cpu time              unlimited            unlimited            seconds
+Max core file size        0                    unlimited            bytes
+Max open files            1024                 unlimited            files
+Max processes             unlimited            unlimited            processes
+Max nice priority         0                    0
