@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The tool itself is Linux-only. The Windows leg exists to prove the
+        # fs.FS testability seam is genuinely portable: unit tests read
+        # fixtures through os.DirFS and never touch the real /proc.
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        # One shell on both runners, so the steps below are written once.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        # gofmt -l exits 0 even when it finds unformatted files, so fail on
+        # any output.
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Lint (golangci-lint)
+        if: runner.os == 'Linux'
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test with race detector
+        # The race detector needs a C toolchain, which the Windows runner
+        # does not have by default.
+        if: runner.os == 'Linux'
+        run: go test -race -coverprofile=cover.out ./...
+
+      - name: Test
+        if: runner.os != 'Linux'
+        run: go test -coverprofile=cover.out ./...
+
+      - name: Coverage floor (80%)
+        run: |
+          total="$(go tool cover -func=cover.out | tail -n 1 | awk '{print $NF}' | tr -d '%')"
+          echo "total coverage: ${total}%"
+          if ! awk -v total="$total" 'BEGIN { exit !(total + 0 >= 80) }'; then
+            echo "coverage ${total}% is below the 80% floor"
+            exit 1
+          fi
+
+      - name: Static linux build
+        # CGO_ENABLED=0 produces a fully static binary that runs on any
+        # Linux regardless of its glibc version.
+        run: CGO_ENABLED=0 GOOS=linux go build -o "${RUNNER_TEMP}/limits-explain" ./cmd/limits-explain
+
+  systemd-integration:
+    # Not part of the OS matrix: this is a single spike job that proves
+    # ubuntu-latest runners are real VMs with systemd as PID 1 and cgroup v2,
+    # de-risking the future systemd source before it is built.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Guard -- fail loudly if PID 1 is not systemd
+        # The integration test below skips (green) when PID 1 is not systemd
+        # -- exactly the wrong failure mode for a spike whose whole point is
+        # proving the runner has systemd. This step fails the job outright
+        # instead of letting a runner-image change silently turn into a
+        # no-op skip that still shows green.
+        run: test "$(cat /proc/1/comm)" = systemd
+
+      - name: Report systemd state
+        run: systemctl is-system-running || true
+
+      - name: Run systemd integration test
+        # The test itself escalates via sudo for systemd-run and systemctl
+        # stop (passwordless sudo on GitHub-hosted runners); go test runs
+        # unprivileged.
+        run: go test -tags=integration -v ./internal/integration/...
