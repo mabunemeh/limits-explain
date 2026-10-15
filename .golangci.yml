@@ -1,0 +1,28 @@
+version: "2"
+
+linters:
+  # Start from nothing so the enabled set is exactly this list, independent
+  # of what a future golangci-lint release turns on by default.
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - revive
+    - ineffassign
+    - unused
+    - misspell
+    - gosec
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      # Tests read fixtures and build throwaway files from constant paths;
+      # gosec path/permission rules add noise there, not safety.
+      - path: _test\.go
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofmt

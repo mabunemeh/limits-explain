@@ -1,0 +1,38 @@
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      # gofmt -l only lists unformatted files; it exits 0 either way, so the
+      # hook fails on any output instead.
+      - id: gofmt
+        name: gofmt
+        language: system
+        entry: bash -c 'out=$(gofmt -l .); if [ -n "$out" ]; then echo "$out"; exit 1; fi'
+        types: [go]
+        pass_filenames: false
+      - id: go-vet
+        name: go vet
+        language: system
+        entry: go vet ./...
+        types: [go]
+        pass_filenames: false
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # testdata directories hold byte-exact captures (real /proc/<pid>/limits
+      # output, deliberately including trailing padding spaces the kernel
+      # writes) and hand-crafted CRLF/malformed-row fixtures whose exact
+      # bytes are the test subject. Both hooks rewrite those bytes
+      # (stripping trailing whitespace, normalizing final newlines), which
+      # would silently corrupt the fixture a test asserts against.
+      - id: trailing-whitespace
+        exclude: /testdata/
+      - id: end-of-file-fixer
+        exclude: /testdata/
+      - id: check-yaml
+      - id: check-added-large-files

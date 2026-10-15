@@ -1,0 +1,19 @@
+# Normal text-file line-ending normalization for everything...
+* text=auto
+
+# ...but Go source is always LF, even in a Windows checkout with
+# core.autocrlf=true: gofmt reports CRLF files as unformatted, so the Windows
+# CI leg would otherwise fail "gofmt -l ." on a correct tree.
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+
+# ...except testdata directories: these are byte-exact captures (real
+# /proc/<pid>/limits output, including the kernel trailing padding spaces)
+# and hand-crafted fixtures whose exact bytes -- including a deliberate CRLF
+# fixture -- ARE the test subject. Git must never rewrite their line endings
+# on checkout/checkin (core.autocrlf=true would otherwise LF->CRLF them on a
+# Windows clone, silently changing byte counts and neutering the
+# CRLF-tolerance test, which would then pass vacuously because the fixture
+# no longer has any CRs to tolerate).
+**/testdata/** -text

@@ -1,0 +1,22 @@
+# Build output
+/limits-explain
+/limits-explain.exe
+dist/
+
+# Test / coverage output
+cover.out
+*.test
+*.coverprofile
+coverage.html
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Stray local directories that may linger in an existing working copy and
+# must never be committed
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
