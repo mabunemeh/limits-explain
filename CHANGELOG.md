@@ -6,8 +6,39 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **A source that fails no longer hides the others.** Previously any source
+  failure ended the run with exit `3` and nothing on stdout; with a second
+  source that would mean a cgroup v1 host losing its rlimit report entirely.
+  Now a source that fails on its own is reported as a
+  `<source>.source_error` row carrying its status and the reason, the rest of
+  the report is printed, and the exit code is `0`. **Exit `0` therefore no
+  longer promises a complete report.** Exit `3` now means nothing could be
+  reported at all: the process does not exist, or *every* source failed, and
+  stdout stays empty. Exit `1` remains reserved for a future threshold check.
+  Anything scripted against the previous behaviour should check for
+  `source_error` rows (or `status` values of `unreadable` and `unparseable`)
+  rather than treating exit `0` as "every limit was read".
+
 ### Added
 
+- **cgroup v2 source** (`internal/sources/cgroup`): resolves the process's
+  cgroup from `proc/<pid>/cgroup`, then walks UP the hierarchy and reports
+  the effective limit as the minimum across the leaf and every ancestor,
+  naming the level that actually binds and what the leaf alone would have
+  allowed. Covers `memory.max`, `pids.max` and `cpu.max` (derived to
+  millicores, with the raw quota/period pair in the notes), and reports
+  `memory.high` as a separate reading that says plainly it throttles and
+  reclaims rather than kills. `max` means unlimited, not a parse failure.
+  Values are exact `uint64`. A level whose controller file is absent is
+  skipped with a note (normal where a controller is not enabled); a level
+  that cannot be read or parsed withholds the limit for that one reading,
+  because the bad level could be the binding one. cgroup v1 and the hybrid
+  layout, a hierarchy not mounted at `sys/fs/cgroup`, a cgroup directory
+  that does not resolve under the mount, and a cgroup path containing `.`
+  or `..` are structural `SourceError`s that name what was found, never
+  numbers from the wrong hierarchy.
 - **rlimits source** (`internal/sources/rlimits`): reads `proc/<pid>/limits`,
   emitting a soft and a hard reading when they differ or one `single`
   reading when they match. Limits are exact `uint64` values, so the kernel
