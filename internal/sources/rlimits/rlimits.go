@@ -206,13 +206,16 @@ func keySegment(kernelName string) string {
 // so callers must check the boolean rather than the Amount to tell
 // "unlimited" from "failed to parse".
 //
-// It is deliberately stricter than a general integer parse: only "unlimited"
-// or a string of ASCII digits is accepted. strconv.ParseUint would take a
-// leading "+" (and, with base 0, underscores such as "10_240"), none of
-// which is ever real kernel output, so the digits are checked first and such
-// near-misses degrade the whole row to unparseable instead of being
-// silently accepted. A number too large for uint64 also fails; the kernel
-// cannot emit one.
+// Only "unlimited" or a string of ASCII digits is accepted, so a near-miss
+// degrades the whole row to unparseable instead of being silently accepted.
+// strconv.ParseUint with base 10 is already this strict on its own: unlike
+// ParseInt it permits no sign at all, and it rejects underscores, hex and
+// float forms and non-ASCII digits. The explicit digit check is kept as
+// defence in depth: it states the intent at the call site and keeps the
+// strictness independent of the base argument, which matters because base 0
+// would accept "0x400" and "10_240" and would read a leading zero as octal,
+// turning "0000050" into 40. A number too large for uint64 also fails; the
+// kernel cannot emit one.
 func parseValue(raw string) (model.Amount, bool) {
 	if raw == unlimited {
 		return model.UnknownAmount(), true

@@ -293,9 +293,12 @@ func TestColumnDriftWithNoUnit(t *testing.T) {
 }
 
 func TestMalformedValuesAreRejected(t *testing.T) {
-	// strconv.ParseUint accepts a leading "+", and with base 0 underscores,
-	// but none of these is ever real kernel output. The row must degrade
-	// rather than be accepted.
+	// None of these is ever real kernel output, so the row must degrade
+	// rather than be accepted. Several would be rejected by
+	// strconv.ParseUint with base 10 anyway; the point of the explicit
+	// ASCII-digit check is that the rejection does not depend on the base
+	// (base 0 would take "0x400" and "10_240") and is stated at the call
+	// site rather than inferred from a strconv argument.
 	for _, bad := range []string{
 		"10_240", "+1024", "-5", "0x400", "1e3", "1.5", "unlimited2", "UNLIMITED",
 		"\u0661\u0662\u0663",   // Arabic-Indic digits: Unicode digits, but not ASCII
