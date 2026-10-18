@@ -3,7 +3,6 @@
 package rlimits
 
 import (
-	"errors"
 	"fmt"
 	"io/fs"
 	"regexp"
@@ -102,12 +101,12 @@ func (s *Source) Collect(pid int, fsys fs.FS) ([]model.LimitReading, error) {
 		// with errors.Is.
 		return nil, &sources.SourceError{
 			Path:   path,
-			Detail: "unreadable: " + describe(err),
+			Detail: "unreadable: " + sources.Describe(err),
 			Err:    err,
 		}
 	}
 
-	lines := splitLines(string(data))
+	lines := sources.SplitLines(string(data))
 	if !strings.HasPrefix(lines[0], "Limit") {
 		return nil, &sources.SourceError{
 			Path:   path,
@@ -142,32 +141,6 @@ func (s *Source) Collect(pid int, fsys fs.FS) ([]model.LimitReading, error) {
 		}
 	}
 	return readings, nil
-}
-
-// describe returns the innermost error text for a read error, without the
-// "open proc/1/limits:" prefix that *fs.PathError adds, since the path is
-// already reported separately.
-func describe(err error) string {
-	var pe *fs.PathError
-	if errors.As(err, &pe) {
-		return pe.Err.Error()
-	}
-	return err.Error()
-}
-
-// splitLines splits text into lines, accepting both LF and CRLF endings.
-//
-// strings.Split on "\n" leaves the "\r" of a CRLF ending on the end of every
-// line. Left in place it would end up inside the unit string and, for rows
-// whose tail ends in a value, inside a number that then fails to parse. A
-// trailing newline yields a final empty element, which callers treat like
-// any other blank line. The result always has at least one element.
-func splitLines(text string) []string {
-	lines := strings.Split(text, "\n")
-	for i, line := range lines {
-		lines[i] = strings.TrimSuffix(line, "\r")
-	}
-	return lines
 }
 
 func anyNonBlank(lines []string) bool {
@@ -220,7 +193,7 @@ func parseValue(raw string) (model.Amount, bool) {
 	if raw == unlimited {
 		return model.UnknownAmount(), true
 	}
-	if !isASCIIDigits(raw) {
+	if !sources.IsASCIIDigits(raw) {
 		return model.UnknownAmount(), false
 	}
 	v, err := strconv.ParseUint(raw, 10, 64)
@@ -228,18 +201,6 @@ func parseValue(raw string) (model.Amount, bool) {
 		return model.UnknownAmount(), false
 	}
 	return model.KnownAmount(v), true
-}
-
-func isASCIIDigits(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 // tokensToTriple returns (soft, hard, unit) from a token list. The unit
