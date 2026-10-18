@@ -33,7 +33,9 @@ const (
 //     controller file) while the rest of the source succeeds. The rlimits
 //     source never uses it: a whole-file read failure there is a
 //     SourceError, because there is nothing left to report once the one
-//     file the source reads is gone.
+//     file the source reads is gone. The CLI also uses it for a whole source
+//     that failed with a read error, surfaced as one degraded row so the
+//     other sources' readings are not lost.
 //  3. [StatusUnlimited]: the limit is unknown by design, because the kernel
 //     reported no ceiling. This outranks unmeasured: with no ceiling there
 //     is nothing to measure usage against, and calling an unlimited reading

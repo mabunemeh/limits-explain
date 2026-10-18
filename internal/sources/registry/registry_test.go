@@ -17,6 +17,9 @@ func TestAll(t *testing.T) {
 		}
 		seen[s.Name()] = true
 	}
+	if !seen["cgroup"] {
+		t.Error(`the "cgroup" source is not registered`)
+	}
 	if !seen["rlimit"] {
 		t.Error(`the "rlimit" source is not registered`)
 	}

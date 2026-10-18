@@ -7,6 +7,7 @@ package registry
 
 import (
 	"github.com/mabunemeh/limits-explain/internal/sources"
+	"github.com/mabunemeh/limits-explain/internal/sources/cgroup"
 	"github.com/mabunemeh/limits-explain/internal/sources/rlimits"
 )
 
@@ -17,5 +18,6 @@ import (
 func All() []sources.Source {
 	return []sources.Source{
 		rlimits.New(),
+		cgroup.New(),
 	}
 }

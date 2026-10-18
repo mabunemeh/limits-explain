@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/mabunemeh/limits-explain/internal/model"
+	"github.com/mabunemeh/limits-explain/internal/sources"
 )
 
 // fixtureRoot returns the --root value for a committed rlimits fixture tree.
@@ -322,5 +326,182 @@ func TestOutputWriteFailureExitsFour(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "broken pipe") {
 		t.Errorf("stderr = %q", stderr.String())
+	}
+}
+
+// cgroupRoot returns the --root value for a committed cgroup fixture tree.
+func cgroupRoot(t *testing.T, name string) string {
+	t.Helper()
+	root := filepath.Join("..", "sources", "cgroup", "testdata", name)
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		t.Fatalf("no such fixture tree: %s (%v)", root, err)
+	}
+	return root
+}
+
+// combinedRoot copies a cgroup fixture into a temp dir and adds the rlimits
+// "basic" limits file, giving a root where both sources can succeed (or,
+// with a v1 tree, where cgroup fails and rlimits still succeeds). Copying
+// keeps every fixture committed exactly once.
+func combinedRoot(t *testing.T, cgroupFixture string) string {
+	t.Helper()
+	dst := t.TempDir()
+	if err := os.CopyFS(dst, os.DirFS(cgroupRoot(t, cgroupFixture))); err != nil {
+		t.Fatal(err)
+	}
+	limits, err := os.ReadFile(filepath.Join(fixtureRoot(t, "basic"), "proc", "4242", "limits"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, "proc", "4242", "limits"), limits, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dst
+}
+
+// rowsByKey decodes --json output into a map keyed by reading key.
+func rowsByKey(t *testing.T, stdout string) map[string]map[string]any {
+	t.Helper()
+	m := map[string]map[string]any{}
+	for _, row := range decodeJSON(t, stdout) {
+		m[row["key"].(string)] = row
+	}
+	return m
+}
+
+func TestPartialFailureRlimitsUpCgroupDown(t *testing.T) {
+	// The rlimits fixtures have no proc/4242/cgroup, so the cgroup source
+	// fails while rlimits succeeds: exit 0, both visible.
+	root := fixtureRoot(t, "basic")
+	table := run("show", "4242", "--root", root)
+	if table.code != 0 || table.stderr != "" {
+		t.Fatalf("exit %d, stderr %q", table.code, table.stderr)
+	}
+	for _, want := range []string{"open files (soft)", "cgroup source", "cgroup", "unreadable", "proc/4242/cgroup"} {
+		if !strings.Contains(table.stdout, want) {
+			t.Errorf("table lacks %q:\n%s", want, table.stdout)
+		}
+	}
+
+	res := run("show", "4242", "--root", root, "--json")
+	if res.code != 0 || res.stderr != "" {
+		t.Fatalf("exit %d, stderr %q", res.code, res.stderr)
+	}
+	rows := rowsByKey(t, res.stdout)
+	if _, ok := rows["rlimit.nofile.soft"]; !ok {
+		t.Error("rlimit rows are missing")
+	}
+	row, ok := rows["cgroup.source_error"]
+	if !ok {
+		t.Fatalf("no cgroup.source_error row: %s", res.stdout)
+	}
+	if row["status"] != "unreadable" || row["source"] != "cgroup" || row["label"] != "cgroup source" ||
+		row["kind"] != "single" || row["limit"] != nil || row["usage"] != nil || row["unit"] != "" {
+		t.Errorf("degraded row = %v", row)
+	}
+	if notes, _ := row["notes"].(string); !strings.Contains(notes, "proc/4242/cgroup: unreadable") {
+		t.Errorf("notes = %q, want the full error text", notes)
+	}
+}
+
+func TestPartialFailureCgroupUpRlimitsDown(t *testing.T) {
+	root := cgroupRoot(t, "nested_ancestor_binds")
+	res := run("show", "4242", "--root", root, "--json")
+	if res.code != 0 || res.stderr != "" {
+		t.Fatalf("exit %d, stderr %q", res.code, res.stderr)
+	}
+	rows := rowsByKey(t, res.stdout)
+	if r := rows["cgroup.pids.max"]; r == nil || r["limit"].(json.Number).String() != "50" {
+		t.Errorf("cgroup.pids.max = %v", r)
+	}
+	row, ok := rows["rlimit.source_error"]
+	if !ok {
+		t.Fatalf("no rlimit.source_error row: %s", res.stdout)
+	}
+	if row["status"] != "unreadable" || row["source"] != "rlimit" || row["label"] != "rlimit source" {
+		t.Errorf("degraded row = %v", row)
+	}
+	if table := run("show", "4242", "--root", root); table.code != 0 ||
+		!strings.Contains(table.stdout, "rlimit source") || !strings.Contains(table.stdout, "tasks") {
+		t.Errorf("table: exit %d\n%s", table.code, table.stdout)
+	}
+}
+
+func TestBothSourcesSucceed(t *testing.T) {
+	root := combinedRoot(t, "nested_ancestor_binds")
+	res := run("show", "4242", "--root", root, "--json")
+	if res.code != 0 || res.stderr != "" {
+		t.Fatalf("exit %d, stderr %q", res.code, res.stderr)
+	}
+	rows := rowsByKey(t, res.stdout)
+	for _, k := range []string{"rlimit.nofile.soft", "cgroup.memory.max", "cgroup.pids.max"} {
+		if rows[k] == nil {
+			t.Errorf("missing %q", k)
+		}
+	}
+	for k := range rows {
+		if strings.HasSuffix(k, ".source_error") {
+			t.Errorf("unexpected degraded row %q", k)
+		}
+	}
+}
+
+func TestV1HostKeepsRlimitsAndShowsTheV1Message(t *testing.T) {
+	root := combinedRoot(t, "v1")
+	res := run("show", "4242", "--root", root, "--json")
+	if res.code != 0 || res.stderr != "" {
+		t.Fatalf("exit %d, stderr %q", res.code, res.stderr)
+	}
+	rows := rowsByKey(t, res.stdout)
+	if rows["rlimit.nofile.soft"] == nil {
+		t.Error("the rlimit rows were lost to the cgroup failure")
+	}
+	row := rows["cgroup.source_error"]
+	if row == nil {
+		t.Fatalf("no cgroup.source_error row: %s", res.stdout)
+	}
+	// The input was read but has no usable v2 structure: unparseable.
+	if row["status"] != "unparseable" {
+		t.Errorf("status = %v, want unparseable", row["status"])
+	}
+	if notes, _ := row["notes"].(string); !strings.Contains(notes, "cgroup v1 hierarchy") {
+		t.Errorf("notes = %q, want the v1 message", notes)
+	}
+	if table := run("show", "4242", "--root", root); !strings.Contains(table.stdout, "cgroup v1 hierarchy") {
+		t.Errorf("table lacks the v1 message:\n%s", table.stdout)
+	}
+}
+
+func TestAllSourcesFailingExitsThreeWithEveryError(t *testing.T) {
+	res := run("show", "4242", "--root", cgroupRoot(t, "v1"))
+	if res.code != 3 || res.stdout != "" {
+		t.Errorf("exit %d, stdout %q, want 3 and empty", res.code, res.stdout)
+	}
+	// errors.Join: both sources' errors are reported, not just the first.
+	for _, want := range []string{"cgroup v1 hierarchy", "proc/4242/limits"} {
+		if !strings.Contains(res.stderr, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, res.stderr)
+		}
+	}
+}
+
+func TestSourceFailureStatusFollowsTheErrorKind(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want model.Status
+	}{
+		{"read error", &sources.SourceError{Path: "p", Detail: "d", Err: fs.ErrPermission}, model.StatusUnreadable},
+		{"structure error", &sources.SourceError{Path: "p", Detail: "d"}, model.StatusUnparseable},
+		{"wrapped structure error", fmt.Errorf("ctx: %w", &sources.SourceError{Path: "p", Detail: "d"}), model.StatusUnparseable},
+		{"not a SourceError", errors.New("boom"), model.StatusUnreadable},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := sourceFailure("x", tc.err)
+			if r.Status != tc.want || r.Key != "x.source_error" || r.Notes != tc.err.Error() {
+				t.Errorf("reading = %+v", r)
+			}
+		})
 	}
 }
