@@ -238,6 +238,29 @@ func TestTabIndentedRowIsRejected(t *testing.T) {
 	}
 }
 
+func TestIndentedRowWithNoNameIsRejected(t *testing.T) {
+	// This is the shape the leading-whitespace guard in parseRow actually
+	// exists for, and the one no fixture covers: an indented row carrying
+	// values and no name at all. The committed leading_whitespace fixture
+	// still has a name, so it is rejected on token count whether or not the
+	// guard is there. Without the guard this row splits into an empty first
+	// field plus two real-looking numbers and is accepted, inventing a
+	// "rlimit.unknown" limit from a row that names nothing.
+	m := collect(t, inMemory(header+"  1024                 2048                 files\n"))
+	row := mustGet(t, m, "rlimit.unparseable.2")
+	if row.Status != model.StatusUnparseable {
+		t.Errorf("status = %q, want unparseable", row.Status)
+	}
+	for key := range m {
+		if key != "rlimit.unparseable.2" {
+			t.Errorf("row produced an extra reading %q: %+v", key, m[key])
+		}
+	}
+	if row.Limit.Known {
+		t.Errorf("Limit = %+v, want unknown", row.Limit)
+	}
+}
+
 func TestColumnDriftBothSides(t *testing.T) {
 	// Verbatim kernel bytes from `prlimit --fsize=18446744073709551614`: the
 	// 20-digit value fills its field exactly, so the column separator drops
