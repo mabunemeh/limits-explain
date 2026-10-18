@@ -1,0 +1,4 @@
+12:pids:/user.slice/user-1.slice
+11:memory:/user.slice/user-1.slice/session-3.scope
+10:cpu,cpuacct:/user.slice
+1:name=systemd:/user.slice/user-1.slice/session-3.scope
