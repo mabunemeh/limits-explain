@@ -21,9 +21,23 @@ type Source interface {
 	// goes through it, using relative, slash-separated paths such as
 	// "proc/4242/limits". The CLI passes os.DirFS("/") (or the --root
 	// directory) and tests pass a directory of fixtures. Because an fs.FS
-	// cannot name anything outside its root (fs.ValidPath rejects rooted
-	// paths and ".." elements), a source cannot escape the root even by
-	// mistake; there is no convention to remember.
+	// cannot NAME anything outside its root (fs.ValidPath rejects rooted
+	// paths and ".." elements), a source cannot reach outside by
+	// constructing a path, even by mistake; there is no convention to
+	// remember.
+	//
+	// That is a guarantee about names, not about reads, and the difference
+	// is load-bearing. os.DirFS is not a sandbox: it opens root + name with
+	// the operating system, so a SYMLINK inside the tree that points
+	// outside it is followed, and the content of a file outside the root
+	// can come back. Measured on go1.27.2: a symlinked directory component
+	// resolved to /etc and its contents were read. The real /sys/fs/cgroup
+	// has no symlinks and --root is a hidden testing flag, so this costs
+	// nothing today, but it matters for anything reading proc/<pid>/fd,
+	// cwd, exe or root, which ARE symlinks and usually point outside any
+	// fixture tree. If --root ever becomes a user-facing feature, or a
+	// source must follow those links safely, os.OpenRoot (os.Root) is the
+	// real boundary; os.DirFS cannot be made into one.
 	//
 	// A structural failure (the input cannot be read, or has no usable
 	// structure) is returned as a *SourceError. A single bad row must

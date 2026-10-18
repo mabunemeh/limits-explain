@@ -64,10 +64,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   written (exit `1` is reserved for a future threshold check).
 - **`fs.FS` testability seam**: every source reads through an `fs.FS`
   rooted at `/` (or the hidden `--root`), with relative slash-separated
-  paths, so a source cannot escape its root. Unit tests run against
-  committed fixture trees under `internal/sources/rlimits/testdata`, which
-  are real kernel captures plus hand-built edge cases, marked `-text` so
-  Git never rewrites their bytes.
+  paths, so a source cannot name a path outside its root. That is a
+  guarantee about names, not reads: `os.DirFS` is not a sandbox and does
+  follow a symlink pointing out of the tree, so `os.OpenRoot` would be
+  needed if `--root` ever became a user-facing feature. Unit tests run
+  against committed fixture trees under `internal/sources/rlimits/testdata`
+  and `internal/sources/cgroup/testdata`, which are real kernel captures
+  plus hand-built edge cases, marked `-text` so Git never rewrites their
+  bytes.
 - **CI**: gofmt, `go vet`, golangci-lint, build and test with a coverage
   floor of 80% on Linux (with the race detector) and Windows, a static
   `CGO_ENABLED=0` Linux build, and a `systemd-integration` job that spawns a
