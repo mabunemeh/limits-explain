@@ -34,9 +34,11 @@ const (
 	// exitUsage is a usage error: a non-integer or non-positive pid, a
 	// missing pid, an unknown flag or command, or an empty --root.
 	exitUsage = 2
-	// exitTarget means the target is missing or unreadable: the process
-	// directory does not exist under the root, or a source could not read
-	// or parse what it needed.
+	// exitTarget means nothing could be reported: the process directory
+	// does not exist under the root, or EVERY source failed to read or
+	// parse what it needed. One source failing while another succeeds is
+	// not this code; that report is printed, with the failure as a
+	// degraded row, and exits 0.
 	exitTarget = 3
 )
 
@@ -66,7 +68,8 @@ type rootOpener func(root string) fs.FS
 // empty --root); 3 nothing could be reported, because the target is missing
 // or unreadable (no such process directory under the root, or EVERY source
 // failed, including the process exiting between the existence check and the
-// read, or a permission error); 4 failing to write the results. 1 is
+// read, or a permission error), and nothing is written to stdout; 4 failing
+// to write the results. 1 is
 // reserved for the forthcoming --warn threshold and is never returned today.
 //
 // Exit 0 does not promise a complete report. When some sources fail and at
@@ -74,6 +77,12 @@ type rootOpener func(root string) fs.FS
 // as a degraded "<source>.source_error" row carrying its status and reason,
 // so the gap is visible in the output rather than only in an exit code.
 func Execute(args []string, stdout, stderr io.Writer) int {
+	// os.DirFS stops a source from NAMING a path outside the root, which is
+	// what the seam is for, but it is not a chroot-style boundary: it
+	// follows a symlink that points out of the root, so a --root aimed at
+	// an untrusted tree can still read files outside it. That is acceptable
+	// because --root is a hidden testing flag and the real /sys/fs/cgroup
+	// holds no symlinks; it would not be if --root ever became a feature.
 	return execute(args, stdout, stderr, func(root string) fs.FS { return os.DirFS(root) })
 }
 

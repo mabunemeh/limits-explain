@@ -398,6 +398,79 @@ func TestTieReportsLeafMostLevel(t *testing.T) {
 	})
 }
 
+// TestCPUSubMillicoreMinimumNamesTheRightLevel pins the exact-comparison
+// rule. Both of these pairs truncate to 1 millicore, so comparing the
+// derived values would make them a tie, the leaf-most would win, and the
+// tool would name the leaf as binding and quote the leaf's raw pair -- a
+// pair 50% higher than what the kernel actually enforces. The kernel
+// accepts both of these (its minimum quota is 1000us), so this is not a
+// hand-edited-file case.
+func TestCPUSubMillicoreMinimumNamesTheRightLevel(t *testing.T) {
+	fsys := inMemory("0::/a/b\n", map[string]string{
+		"sys/fs/cgroup/a/cpu.max":   "1000 1000000\n", // 1.0 millicore: the real minimum
+		"sys/fs/cgroup/a/b/cpu.max": "1500 1000000\n", // 1.5 millicores
+	})
+	check(t, collect(t, fsys), []want{
+		{key: "cgroup.cpu.max", limit: u(1), status: model.StatusUnmeasured, unit: "millicores",
+			contains: []string{
+				"bound by /a (sys/fs/cgroup/a/cpu.max)",
+				`raw cpu.max "1000 1000000"`,
+			},
+			// The binding clause and its raw pair must name /a, not the
+			// leaf. The leaf's own pair appears only in its "allows" clause.
+			absent: []string{"raw cpu.max \"1500 1000000\"", "bound by /a/b"}},
+	})
+
+	// The inverse: the leaf really is the tighter of the two.
+	fsys = inMemory("0::/a/b\n", map[string]string{
+		"sys/fs/cgroup/a/cpu.max":   "1900 1000000\n",
+		"sys/fs/cgroup/a/b/cpu.max": "1100 1000000\n",
+	})
+	check(t, collect(t, fsys), []want{
+		{key: "cgroup.cpu.max", limit: u(1), status: model.StatusUnmeasured, unit: "millicores",
+			contains: []string{
+				"bound by /a/b (sys/fs/cgroup/a/b/cpu.max)",
+				`raw cpu.max "1100 1000000"`,
+				"truncated toward zero",
+			},
+			absent: []string{`"1900 1000000"`}},
+	})
+
+	// A quota below a thousandth of its period reports 0 millicores, which
+	// would read as "no CPU at all" without the truncation clause.
+	fsys = inMemory("0::/a\n", map[string]string{"sys/fs/cgroup/a/cpu.max": "1 1000000\n"})
+	check(t, collect(t, fsys), []want{
+		{key: "cgroup.cpu.max", limit: u(0), status: model.StatusUnmeasured, unit: "millicores",
+			contains: []string{`raw cpu.max "1 1000000"`, "truncated toward zero"}},
+	})
+
+	// A pair whose cross-products exceed 64 bits, so the comparison is
+	// decided by the high word rather than the low one. The leaf allows
+	// 2^64-1 millicores against the ancestor's 1000, so the ancestor binds;
+	// a 64-bit-only comparison of these products would wrap and could pick
+	// the leaf.
+	fsys = inMemory("0::/a/b\n", map[string]string{
+		"sys/fs/cgroup/a/cpu.max":   "1000 1000\n",
+		"sys/fs/cgroup/a/b/cpu.max": "18446744073709551615 1000\n",
+	})
+	check(t, collect(t, fsys), []want{
+		{key: "cgroup.cpu.max", limit: u(1000), status: model.StatusUnmeasured, unit: "millicores",
+			contains: []string{
+				"bound by /a (sys/fs/cgroup/a/cpu.max)",
+				`raw cpu.max "1000 1000"`,
+				"leaf /a/b allows 18446744073709551615",
+			},
+			absent: []string{"raw cpu.max \"18446744073709551615 1000\""}},
+	})
+
+	// An exact division must NOT carry the truncation clause.
+	fsys = inMemory("0::/a\n", map[string]string{"sys/fs/cgroup/a/cpu.max": "20000 100000\n"})
+	check(t, collect(t, fsys), []want{
+		{key: "cgroup.cpu.max", limit: u(200), status: model.StatusUnmeasured, unit: "millicores",
+			absent: []string{"truncated"}},
+	})
+}
+
 func TestCPUVariants(t *testing.T) {
 	tests := []struct {
 		content string

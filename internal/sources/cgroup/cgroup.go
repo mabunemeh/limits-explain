@@ -85,10 +85,43 @@ type level struct {
 
 // parsed is the verdict on one controller file's content.
 type parsed struct {
-	kind  valueKind
+	kind valueKind
+	// value is the number reported as the limit. For cpu.max it is the
+	// derived millicores, which is truncated toward zero.
 	value uint64
+	// num and den are the EXACT quantity this level allows, as a fraction,
+	// and they are what levels are compared by. A scalar controller sets
+	// den to 1 and they are just the value. cpu.max sets them to the raw
+	// quota and period, so two levels are compared before the division to
+	// millicores rather than after it.
+	//
+	// Comparing after the division would be wrong, and not only in the last
+	// digit: a parent of "1000 1000000" (1.0 millicore) and a leaf of
+	// "1500 1000000" (1.5) both truncate to 1, the tie would then go to the
+	// leaf, and the tool would name the leaf as binding and quote the
+	// leaf's raw pair -- pointing at the wrong cgroup and offering a raw
+	// pair 50% higher than the one the kernel enforces. The headline number
+	// would still be right (truncation is monotone, so the minimum of the
+	// truncated values equals the truncation of the true minimum), but the
+	// attribution is the thing this source exists to get right.
+	num, den uint64
+	// truncated says the division to value lost a remainder, so value is
+	// smaller than the real allowance and the raw pair is the exact figure.
+	truncated bool
 	// detail is the reason for kindUnparseable.
 	detail string
+}
+
+// lessExact reports whether a allows strictly less than b, comparing the
+// fractions exactly by cross-multiplying into 128 bits so neither product
+// can overflow.
+func lessExact(a, b parsed) bool {
+	ahi, alo := bits.Mul64(a.num, b.den)
+	bhi, blo := bits.Mul64(b.num, a.den)
+	if ahi != bhi {
+		return ahi < bhi
+	}
+	return alo < blo
 }
 
 // controller describes one of the four files this source reads.
@@ -178,6 +211,14 @@ func resolveCgroup(file string, fsys fs.FS) (string, error) {
 			// This is also where a cgroup path containing a newline lands:
 			// the second half of the path becomes a line of its own with no
 			// colons. Failing closed beats resolving a truncated path.
+			//
+			// A path containing a bare CR takes a different route and is
+			// also safe, though less directly: SplitLines only strips a
+			// TRAILING CR, so "0::/a\r0::/b" stays one entry whose path is
+			// "/a\r0::/b". That is structurally a valid unified entry, so
+			// it is accepted here and then fails the leaf-directory check
+			// below, because no such directory exists. No real kernel emits
+			// a CR, and either way no wrong number escapes.
 			return "", &sources.SourceError{
 				Path:   file,
 				Detail: fmt.Sprintf("malformed entry %q (expected hierarchy-ID:controllers:path)", line),
@@ -415,12 +456,13 @@ func collectController(fsys fs.FS, c controller, chain []level) (model.LimitRead
 func aggregateGood(r *model.LimitReading, c controller, results []levelResult) []string {
 	leaf := results[0]
 
-	// Scan leafward and keep the FIRST minimum (strict less-than). A tie
-	// means both levels bind; the leaf-most is reported because it is the
-	// cgroup the reader is looking at.
+	// Scan leafward and keep the FIRST minimum (strict less-than), compared
+	// exactly rather than by the reported value. A tie means both levels
+	// bind; the leaf-most is reported because it is the cgroup the reader
+	// is looking at.
 	bind := -1
 	for i, res := range results {
-		if res.parsed.kind == kindFinite && (bind < 0 || res.parsed.value < results[bind].parsed.value) {
+		if res.parsed.kind == kindFinite && (bind < 0 || lessExact(res.parsed, results[bind].parsed)) {
 			bind = i
 		}
 	}
@@ -434,6 +476,14 @@ func aggregateGood(r *model.LimitReading, c controller, results []levelResult) [
 		switch {
 		case bind == 0:
 			// The binding level is the leaf and was named above.
+		case leaf.parsed.kind == kindFinite && c.isCPU:
+			// The leaf's own millicores are truncated too, so for cpu the
+			// raw pair comes along: without it a leaf of "1500 1000000"
+			// reads as "allows 1" next to a binding level of exactly 1,
+			// which looks like the leaf imposes the same ceiling when it is
+			// in fact looser.
+			clauses = append(clauses, fmt.Sprintf("leaf %s allows %d (raw %q)",
+				leaf.level.display, leaf.parsed.value, leaf.raw))
 		case leaf.parsed.kind == kindFinite:
 			clauses = append(clauses, fmt.Sprintf("leaf %s allows %d", leaf.level.display, leaf.parsed.value))
 		default:
@@ -441,6 +491,13 @@ func aggregateGood(r *model.LimitReading, c controller, results []levelResult) [
 		}
 		if c.isCPU {
 			clauses = append(clauses, rawCPU(b))
+			if b.parsed.truncated {
+				// Without this the reader cannot tell 1.0 millicore from
+				// 1.9, and a quota below a thousandth of its period would
+				// report a flat 0 that reads as "no CPU at all".
+				clauses = append(clauses, "millicores are truncated toward zero; "+
+					"the raw pair above is the exact limit")
+			}
 		}
 		return clauses
 	}
@@ -482,7 +539,8 @@ func parseScalar(content string) parsed {
 		return parsed{kind: kindUnlimited}
 	}
 	if v, ok := parseUint(content); ok {
-		return parsed{kind: kindFinite, value: v}
+		// den 1: a scalar controller's exact allowance is the value itself.
+		return parsed{kind: kindFinite, value: v, num: v, den: 1}
 	}
 	return parsed{kind: kindUnparseable, detail: quoteBounded(content)}
 }
@@ -531,8 +589,16 @@ func parseCPU(content string) parsed {
 		return parsed{kind: kindUnparseable, detail: quoteBounded(content) +
 			" (derived millicores do not fit in 64 bits)"}
 	}
-	millicores, _ := bits.Div64(hi, lo, period)
-	return parsed{kind: kindFinite, value: millicores}
+	millicores, rem := bits.Div64(hi, lo, period)
+	// num and den stay the raw pair so levels are compared exactly; see the
+	// comment on parsed.
+	return parsed{
+		kind:      kindFinite,
+		value:     millicores,
+		num:       quota,
+		den:       period,
+		truncated: rem != 0,
+	}
 }
 
 // quoteBounded quotes at most maxRawNote bytes of raw file content, so a
