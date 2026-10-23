@@ -8,6 +8,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Exit `1` is now returned.** It means at least one MEASURED reading is at
+  or above `--warn` percent of its limit (default 90). The report is printed
+  first (table or `--json`) and a one-line message goes to stderr, with no
+  usage hint. Unmeasured limits neither trigger nor suppress it: a partial
+  report whose measured readings are all under the threshold still exits `0`,
+  and its headline names the gap, so exit `0` is never an all-clear on its
+  own. A failure to write the report (exit `4`) wins over `1`. Scripts that
+  treated every non-zero exit as "the tool broke" must now allow `1`.
+- **Table and JSON output changed shape.** The table gains Headroom and Used
+  columns after Usage, and a `nearest ceiling:` headline under the title
+  (plus a `warning:` line when something is at or above `--warn`). Rows are
+  now ranked rather than in collection order, in the table and in `--json`,
+  which gains `headroom` and `over_by` (exact integers, `null` when the
+  reading is not measured; `headroom` is `0` when usage is at or over the
+  limit). The JSON stays a bare array with alphabetical keys and no float
+  fields.
 - **A source that fails no longer hides the others.** Previously any source
   failure ended the run with exit `3` and nothing on stdout; with a second
   source that would mean a cgroup v1 host losing its rlimit report entirely.
@@ -16,13 +32,40 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the report is printed, and the exit code is `0`. **Exit `0` therefore no
   longer promises a complete report.** Exit `3` now means nothing could be
   reported at all: the process does not exist, or *every* source failed, and
-  stdout stays empty. Exit `1` remains reserved for a future threshold check.
-  Anything scripted against the previous behaviour should check for
+  stdout stays empty. Anything scripted against the previous behaviour should check for
   `source_error` rows (or `status` values of `unreadable` and `unparseable`)
   rather than treating exit `0` as "every limit was read".
 
 ### Added
 
+- **Usage and headroom for memory and tasks.** The cgroup source now reads
+  `memory.current` (for `memory.max` and `memory.high`) and `pids.current`
+  (for `pids.max`), strictly parsed, at every level with a finite limit: each
+  level's limit is enforced against its own counter, which covers its whole
+  subtree. A missing, unreadable or unparseable counter at ANY finite level
+  leaves the reading `unmeasured` (with the tightest limit) and a note naming
+  each file and why, because the unknown level could be the one over the
+  threshold; usage is never guessed or borrowed. `cpu.max` and the rlimits
+  have no usage yet and stay unmeasured.
+- **Measured cgroup rows show the level nearest its ceiling.** The displayed
+  limit and usage come from the level with the highest exact usage/limit
+  (the rootmost on a tie), so a quiet leaf cannot hide an ancestor at 95%.
+  The notes name the tightest static ceiling when it is a different level,
+  and add `least headroom: <level> (<n> <unit> left)` when another level has
+  strictly less absolute headroom (the ratio still decides what is shown).
+- **Exact arithmetic.** Headroom never subtracts without comparing first, so
+  usage above the limit reports `over by N` instead of wrapping around. The
+  `--warn` check (`usage*100 >= percent*limit`) and the ranking comparison run
+  in 128 bits with no floating point, so they stay exact above 2^53 and near
+  2^64. A zero limit counts as fully consumed at any usage. The displayed
+  percentage is floored to a tenth, so a reading that did not trip `--warn 90`
+  never displays as `90.0%`.
+- **Ranking and headline.** Measured readings by consumed fraction, then the
+  readings that could not be measured, then the unlimited ones; ties keep
+  collection order. `nearest ceiling:` names the closest one and counts the
+  limits not measured.
+- **`--warn PERCENT`** (default 90, integer 1-100, plain decimal digits only:
+  hex, signs and fractions are usage errors, and `090` is 90, not octal).
 - **cgroup v2 source** (`internal/sources/cgroup`): resolves the process's
   cgroup from `proc/<pid>/cgroup`, then walks UP the hierarchy and reports
   the effective limit as the minimum across the leaf and every ancestor,
@@ -61,7 +104,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   layout or the terminal. Exit codes: `0` success, `2` usage error
   (including a non-positive pid or an empty `--root`), `3` the process is
   missing or its limits cannot be read, `4` the results could not be
-  written (exit `1` is reserved for a future threshold check).
+  written (exit `1` was reserved at this point and is now the `--warn` check).
 - **`fs.FS` testability seam**: every source reads through an `fs.FS`
   rooted at `/` (or the hidden `--root`), with relative slash-separated
   paths, so a source cannot name a path outside its root. That is a

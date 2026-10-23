@@ -23,34 +23,45 @@ limits-explain show <pid> --json   # machine-readable
 
 ```text
 limits-explain
-Name                   Source  Limit      Usage  Unit       Status      Notes
-cpu time               rlimit  unlimited  n/a    seconds    unlimited
-stack size (soft)      rlimit  8388608    n/a    bytes      unmeasured
-stack size (hard)      rlimit  unlimited  n/a    bytes      unlimited
-processes              rlimit  62339      n/a    processes  unmeasured
-open files (soft)      rlimit  10240      n/a    files      unmeasured
-open files (hard)      rlimit  1048576    n/a    files      unmeasured
+nearest ceiling: memory (high) 77.5% (620 of 800 bytes) (10 limits not measured)
+Name               Source  Limit    Usage  Headroom  Used   Unit       Status
+memory (high)      cgroup  800      620    180       77.5%  bytes      ok
+memory             cgroup  1000     620    380       62.0%  bytes      ok
+tasks              cgroup  100      9      91        9.0%   processes  ok
+stack size (soft)  rlimit  8388608  n/a    n/a       n/a    bytes      unmeasured
+...
 ```
 
-The Usage column is always `n/a`; the tool reports limits only.
+Readings are ranked nearest ceiling first, then the limits that could not be
+measured, then the unlimited ones. Usage is read for the cgroup memory and
+task limits, at every level that has one; the rlimit rows are limits only for now and count as not
+measured. The headline names how many were not measured whenever any were, so a report is
+never an all-clear on its own. `--warn PERCENT` (default 90, 1-100) sets the
+threshold for exit `1`.
 
-A cgroup row names the level that actually binds, in the Notes column:
+A cgroup row shows the level nearest its ceiling (by usage/limit, the
+rootmost on a tie), which can be an ancestor looser than the tightest limit,
+and says so in the Notes column:
 
 ```text
-tasks  cgroup  50  n/a  processes  unmeasured  bound by /le-test (sys/fs/cgroup/le-test/pids.max); leaf /le-test/child allows 100
+memory  cgroup  100000  90000  10000  90.0%  bytes  ok  nearest its ceiling: /a (sys/fs/cgroup/a/memory.max); usage read at /a (sys/fs/cgroup/a/memory.current), which counts its whole subtree; tightest ceiling: /a/b allows 1000; least headroom: /a/b (500 bytes left); ...
 ```
+
+If any level's usage counter cannot be read the row stays unmeasured.
 
 Exit codes:
 
-- `0` a report was produced. It may be incomplete: a source that fails on its
+- `0` a report was produced and no measured reading is at or above `--warn`.
+  It may be incomplete: a source that fails on its
   own is reported as a `<source>.source_error` row, with the reason in its
   notes, while the other sources are still shown. Exit `0` does not promise
   that every limit binding the process was read.
-- `1` reserved for a future threshold check; never returned today.
+- `1` a measured reading is at or above `--warn`. The report is still
+  printed; unmeasured limits neither trigger nor suppress it.
 - `2` usage error.
 - `3` nothing could be reported, because the process does not exist or every
   source failed. Nothing is written to stdout.
-- `4` the results could not be written.
+- `4` the results could not be written; this wins over `1`.
 
 ## Scope
 
