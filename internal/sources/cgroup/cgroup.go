@@ -30,8 +30,19 @@
 // not recognise degrades that one reading to unparseable; it never hides the
 // other three.
 //
-// This source reports limits only. Every reading has an unknown Usage, so its
-// status is unmeasured, unlimited, unreadable or unparseable, never ok.
+// Usage is read for memory and tasks only: memory.current for memory.max and
+// memory.high, pids.current for pids.max. It is read at EVERY level with a
+// finite limit, because each level's limit is enforced against that level's own
+// counter, which covers its whole subtree. The row then shows the level
+// nearest its ceiling by exact usage/limit ratio (the rootmost on a tie),
+// which can be an ancestor looser than the tightest static ceiling; the notes
+// name the tightest ceiling and any level with less absolute headroom. The
+// counters are parsed as strictly as the limits. If any finite level's counter
+// is missing, unreadable or unparseable the reading stays unmeasured, with the
+// tightest static limit, and the notes say which file and why: an unknown level
+// could be the one over the threshold, so usage is never guessed or borrowed.
+// cpu.max has no usage counter in this source and stays unmeasured. A reading
+// is ok only when both its limit and its usage were read.
 package cgroup
 
 import (
@@ -135,14 +146,18 @@ type controller struct {
 	isCPU bool
 	// throttle selects the memory.high-only explanatory clause.
 	throttle bool
+	// usage is the file holding current usage, read at the binding level, or
+	// empty when this controller has no usage counter here.
+	usage string
 }
 
 // controllers is the fixed read order, which is also the output order. Keys
 // are fixed and unique, so no collision counter is needed here.
 var controllers = []controller{
-	{file: "memory.max", label: "memory", unit: "bytes", parse: parseScalar},
-	{file: "memory.high", label: "memory (high)", unit: "bytes", parse: parseScalar, throttle: true},
-	{file: "pids.max", label: "tasks", unit: "processes", parse: parseScalar},
+	{file: "memory.max", label: "memory", unit: "bytes", parse: parseScalar, usage: "memory.current"},
+	{file: "memory.high", label: "memory (high)", unit: "bytes", parse: parseScalar, throttle: true,
+		usage: "memory.current"},
+	{file: "pids.max", label: "tasks", unit: "processes", parse: parseScalar, usage: "pids.current"},
 	{file: "cpu.max", label: "cpu bandwidth", unit: "millicores", parse: parseCPU, isCPU: true},
 }
 
@@ -410,8 +425,8 @@ func collectController(fsys fs.FS, c controller, chain []level) (model.LimitRead
 	// levels that did parse could state a ceiling higher than the real one.
 	// That wrong number is the one thing this tool must never produce, so
 	// the reading fails closed with an unknown limit. Only when every
-	// present level is understood do finite values (unmeasured, because no
-	// usage is collected yet) outrank a uniform "max" (unlimited): a single
+	// present level is understood do finite values outrank a uniform "max"
+	// (unlimited): a single
 	// finite ceiling anywhere in the chain binds the process no matter how
 	// many other levels are unbounded.
 	hasUnparseable, hasUnreadable := false, false
@@ -430,7 +445,7 @@ func collectController(fsys fs.FS, c controller, chain []level) (model.LimitRead
 		clauses = append(clauses, fmt.Sprintf("leaf %s; limit withheld because a level could not be read "+
 			"and might be the binding one", leaf))
 	default:
-		clauses = append(clauses, aggregateGood(&r, c, results)...)
+		clauses = append(clauses, aggregateGood(&r, c, results, fsys)...)
 	}
 
 	if skipped := levelsWhere(results, kindSkipped); len(skipped) > 0 {
@@ -453,7 +468,7 @@ func collectController(fsys fs.FS, c controller, chain []level) (model.LimitRead
 
 // aggregateGood fills in the limit and status for a controller where every
 // present level was readable and parseable, and returns the note clauses.
-func aggregateGood(r *model.LimitReading, c controller, results []levelResult) []string {
+func aggregateGood(r *model.LimitReading, c controller, results []levelResult, fsys fs.FS) []string {
 	leaf := results[0]
 
 	// Scan leafward and keep the FIRST minimum (strict less-than), compared
@@ -470,12 +485,40 @@ func aggregateGood(r *model.LimitReading, c controller, results []levelResult) [
 	var clauses []string
 	if bind >= 0 {
 		b := results[bind]
-		r.Limit = model.KnownAmount(b.parsed.value)
-		r.Status = model.DefaultStatus(r.Limit, r.Usage) // unmeasured until usage is collected
-		clauses = append(clauses, fmt.Sprintf("bound by %s (%s)", b.level.display, b.file))
+		// shown is the level whose limit and usage the row displays. It is
+		// the tightest static ceiling (bind) unless usage was measured at
+		// every finite level, in which case it is the level nearest its
+		// ceiling by ratio.
+		shown := bind
+		m := measureLevels(c, results, fsys)
+		if m.ok {
+			shown = m.shown
+			sh := results[shown]
+			r.Limit = model.KnownAmount(sh.parsed.value)
+			r.Usage = model.KnownAmount(m.usage[shown])
+			clauses = append(clauses, fmt.Sprintf("nearest its ceiling: %s (%s)", sh.level.display, sh.file))
+			usageFile := sh.level.dir + "/" + c.usage
+			if shown == 0 {
+				clauses = append(clauses, fmt.Sprintf("usage read at %s (%s)", sh.level.display, usageFile))
+			} else {
+				clauses = append(clauses, fmt.Sprintf("usage read at %s (%s), which counts its whole subtree",
+					sh.level.display, usageFile))
+			}
+			if shown != bind {
+				clauses = append(clauses, fmt.Sprintf("tightest ceiling: %s allows %d",
+					b.level.display, b.parsed.value))
+			}
+			clauses = append(clauses, m.leastHeadroom...)
+		} else {
+			r.Limit = model.KnownAmount(b.parsed.value)
+			clauses = append(clauses, fmt.Sprintf("bound by %s (%s)", b.level.display, b.file))
+			clauses = append(clauses, m.problems...)
+		}
+		// Unmeasured unless every finite level's counter was read.
+		r.Status = model.DefaultStatus(r.Limit, r.Usage)
 		switch {
-		case bind == 0:
-			// The binding level is the leaf and was named above.
+		case shown == 0:
+			// The displayed level is the leaf and was named above.
 		case leaf.parsed.kind == kindFinite && c.isCPU:
 			// The leaf's own millicores are truncated too, so for cpu the
 			// raw pair comes along: without it a leaf of "1500 1000000"
@@ -514,6 +557,99 @@ func aggregateGood(r *model.LimitReading, c controller, results []levelResult) [
 		}
 	}
 	return clauses
+}
+
+// measurement is the outcome of reading the usage counters of one controller.
+type measurement struct {
+	// ok is true only when the controller has a usage counter and the counter
+	// of EVERY finite level was read and parsed.
+	ok bool
+	// shown is the index into results of the level whose limit and usage the
+	// row displays; usage holds each finite level's counter by index.
+	shown int
+	usage []uint64
+	// leastHeadroom is the note clause naming a level with strictly less
+	// absolute headroom than the displayed one, or nil.
+	leastHeadroom []string
+	// problems are the note clauses for counters that could not be read.
+	problems []string
+}
+
+// measureLevels reads the usage counter at every level that has a finite
+// limit. Each level's own limit is enforced against that level's own counter
+// (which counts its whole subtree), so a leaf at 10% under an ancestor at 95%
+// must not hide the ancestor: the row shows the level with the highest exact
+// usage/limit, the rootmost on a tie.
+//
+// It fails closed. If any finite level's counter is missing, unreadable or
+// unparseable the result is not ok and the row stays unmeasured, because the
+// unknown level could be the one over the --warn threshold. Usage is never
+// borrowed from another level.
+func measureLevels(c controller, results []levelResult, fsys fs.FS) measurement {
+	m := measurement{usage: make([]uint64, len(results))}
+	if c.usage == "" {
+		return m
+	}
+	asReading := func(i int) model.LimitReading {
+		return model.LimitReading{
+			Limit: model.KnownAmount(results[i].parsed.value),
+			Usage: model.KnownAmount(m.usage[i]),
+		}
+	}
+	var finite []int
+	for i, res := range results {
+		if res.parsed.kind != kindFinite {
+			continue
+		}
+		finite = append(finite, i)
+		file := res.level.dir + "/" + c.usage
+		data, err := fs.ReadFile(fsys, file)
+		var reason string
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			reason = "absent"
+		case err != nil:
+			reason = "unreadable: " + sources.Describe(err)
+		default:
+			raw := strings.TrimSpace(string(data))
+			if v, ok := parseUint(raw); ok {
+				m.usage[i] = v
+				continue
+			}
+			reason = "unparseable: " + quoteBounded(raw)
+		}
+		m.problems = append(m.problems, fmt.Sprintf("usage not measured: %s %s", file, reason))
+	}
+	if len(m.problems) > 0 || len(finite) == 0 {
+		return m
+	}
+
+	// Leaf-first order, so >= makes the rootmost of equal fractions win.
+	m.shown = finite[0]
+	for _, i := range finite[1:] {
+		if model.CompareConsumed(asReading(i), asReading(m.shown)) >= 0 {
+			m.shown = i
+		}
+	}
+
+	// Ratio and absolute headroom can disagree. The displayed level is never
+	// changed because of it; the other level is only named.
+	headroom := func(i int) uint64 {
+		rem, _, _ := asReading(i).Headroom()
+		return rem
+	}
+	least := m.shown
+	for _, i := range finite {
+		if headroom(i) < headroom(least) {
+			least = i
+		}
+	}
+	if least != m.shown {
+		m.leastHeadroom = []string{fmt.Sprintf("least headroom: %s (%d %s left)",
+			results[least].level.display, headroom(least), c.unit)}
+	}
+	m.ok = true
+	return m
 }
 
 // rawCPU quotes the unmodified cpu.max pair of a level.

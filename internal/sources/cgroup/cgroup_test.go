@@ -75,10 +75,12 @@ func (r *recordingFS) Open(name string) (fs.File, error) {
 
 func u(v uint64) *uint64 { return &v }
 
-// want is the expected shape of one reading. A nil limit means unknown.
+// want is the expected shape of one reading. A nil limit or usage means
+// unknown.
 type want struct {
 	key      string
 	limit    *uint64
+	usage    *uint64
 	status   model.Status
 	unit     string
 	contains []string
@@ -109,6 +111,13 @@ func check(t *testing.T, got []model.LimitReading, wants []want) {
 		} else if r.Limit != model.KnownAmount(*w.limit) {
 			t.Errorf("%s: Limit = %+v, want %d", r.Key, r.Limit, *w.limit)
 		}
+		if w.usage == nil {
+			if r.Usage.Known {
+				t.Errorf("%s: Usage = %+v, want unknown", r.Key, r.Usage)
+			}
+		} else if r.Usage != model.KnownAmount(*w.usage) {
+			t.Errorf("%s: Usage = %+v, want %d", r.Key, r.Usage, *w.usage)
+		}
 		if r.Status != w.status {
 			t.Errorf("%s: Status = %q, want %q (notes: %s)", r.Key, r.Status, w.status, r.Notes)
 		}
@@ -125,9 +134,13 @@ func check(t *testing.T, got []model.LimitReading, wants []want) {
 				t.Errorf("%s: notes contain %q:\n%s", r.Key, s, r.Notes)
 			}
 		}
-		// Invariants of every reading: limits only, never ok.
-		if r.Kind != model.KindSingle || r.Source != Name || r.Usage.Known || r.Status == model.StatusOK {
-			t.Errorf("%s: kind %q source %q usage %+v status %q", r.Key, r.Kind, r.Source, r.Usage, r.Status)
+		// Invariants of every reading: ok exactly when both sides are known,
+		// and usage never known without a limit.
+		if r.Kind != model.KindSingle || r.Source != Name ||
+			(r.Status == model.StatusOK) != (r.Limit.Known && r.Usage.Known) ||
+			(r.Usage.Known && !r.Limit.Known) {
+			t.Errorf("%s: kind %q source %q limit %+v usage %+v status %q",
+				r.Key, r.Kind, r.Source, r.Limit, r.Usage, r.Status)
 		}
 	}
 }
