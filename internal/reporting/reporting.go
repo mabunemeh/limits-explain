@@ -12,6 +12,7 @@ import (
 	"unicode"
 
 	"github.com/mabunemeh/limits-explain/internal/model"
+	"github.com/mabunemeh/limits-explain/internal/ranking"
 )
 
 // notAvailable is shown wherever a value is unknown.
@@ -93,8 +94,77 @@ func limitCell(r model.LimitReading) string {
 	return notAvailable
 }
 
-// WriteTable renders readings as an aligned text table under a title line.
-func WriteTable(w io.Writer, readings []model.LimitReading) error {
+// headroomCell renders the Headroom column: n/a when unknown, the exact
+// remaining amount, or "over by N" when usage is past the limit. Exactly at
+// the limit is "0", not "over by 0".
+func headroomCell(r model.LimitReading) string {
+	remaining, overBy, ok := r.Headroom()
+	switch {
+	case !ok:
+		return notAvailable
+	case overBy > 0:
+		return "over by " + strconv.FormatUint(overBy, 10)
+	}
+	return strconv.FormatUint(remaining, 10)
+}
+
+// usedCell renders the Used column, the floored percentage of the limit
+// consumed, or n/a.
+func usedCell(r model.LimitReading) string {
+	p, ok := r.Percent()
+	if !ok {
+		return notAvailable
+	}
+	return p + "%"
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// headline builds the "nearest ceiling" line. The gap count is part of the
+// line on purpose: a report with unmeasured limits must never read as an
+// all-clear, and the headline is the one line everybody reads.
+func headline(s ranking.Summary) string {
+	gap := ""
+	if s.NotMeasured > 0 {
+		gap = fmt.Sprintf(" (%d %s not measured)", s.NotMeasured, plural(s.NotMeasured, "limit", "limits"))
+	}
+	switch {
+	case s.HasNearest:
+		n := s.Nearest
+		pct, _ := n.Percent() // measured by construction
+		detail := strconv.FormatUint(n.Usage.Value, 10) + " of " + strconv.FormatUint(n.Limit.Value, 10)
+		if n.Unit != "" {
+			detail += " " + n.Unit
+		}
+		return fmt.Sprintf("nearest ceiling: %s %s%% (%s)%s", cell(DisplayName(n)), cell(pct), cell(detail), gap)
+	case s.Total == 0:
+		return "nearest ceiling: none, no limits found"
+	case s.NotMeasured > 0:
+		return "nearest ceiling: unknown" + gap
+	}
+	return "nearest ceiling: none, every limit is unlimited"
+}
+
+// warnLine builds the second headline line, or "" when nothing is at or
+// above the threshold.
+func warnLine(s ranking.Summary, warn uint64) string {
+	if s.Warned == 0 {
+		return ""
+	}
+	return fmt.Sprintf("warning: %d %s at or above --warn %d%%",
+		s.Warned, plural(s.Warned, "reading", "readings"), warn)
+}
+
+// WriteTable renders readings, which the caller has already ranked, as an
+// aligned text table under a title line and the nearest-ceiling headline.
+// warn is the --warn percentage; it only decides whether the warning line
+// appears.
+func WriteTable(w io.Writer, readings []model.LimitReading, warn uint64) error {
 	var buf bytes.Buffer
 	tw := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
 
@@ -110,13 +180,15 @@ func WriteTable(w io.Writer, readings []model.LimitReading) error {
 		_, _ = fmt.Fprintln(tw)
 	}
 
-	row("Name", "Source", "Limit", "Usage", "Unit", "Status", "Notes")
+	row("Name", "Source", "Limit", "Usage", "Headroom", "Used", "Unit", "Status", "Notes")
 	for _, r := range readings {
 		row(
 			cell(DisplayName(r)),
 			cell(r.Source),
 			cell(limitCell(r)),
 			cell(amountCell(r.Usage)),
+			cell(headroomCell(r)),
+			cell(usedCell(r)),
 			cell(r.Unit),
 			cell(string(r.Status)),
 			cell(r.Notes),
@@ -130,6 +202,14 @@ func WriteTable(w io.Writer, readings []model.LimitReading) error {
 	// so trim it rather than emit trailing whitespace on each line.
 	var out strings.Builder
 	out.WriteString("limits-explain\n")
+	// The headline is built outside the tabwriter: it is prose, not a cell,
+	// and must not influence the column widths. Its dynamic text goes
+	// through cell() inside headline.
+	sum := ranking.Summarize(readings, warn)
+	out.WriteString(headline(sum) + "\n")
+	if line := warnLine(sum, warn); line != "" {
+		out.WriteString(line + "\n")
+	}
 	for _, line := range strings.SplitAfter(buf.String(), "\n") {
 		out.WriteString(strings.TrimRight(line, " \n"))
 		if strings.HasSuffix(line, "\n") {
@@ -146,41 +226,56 @@ func WriteTable(w io.Writer, readings []model.LimitReading) error {
 // Name, the same display string the table shows. Fields are declared in
 // alphabetical order of their JSON keys, so the output is stable and
 // diff-friendly.
+//
+// Headroom and OverBy are exact integers, null when the reading is not
+// measured. Headroom is 0 when usage is at or past the limit, and OverBy is
+// the excess (0 when not over). There are deliberately no float fields: the
+// percentage is a display concern, and a consumer can derive it from the
+// exact integers.
 type jsonRow struct {
-	Key    string       `json:"key"`
-	Kind   model.Kind   `json:"kind"`
-	Label  string       `json:"label"`
-	Limit  model.Amount `json:"limit"`
-	Name   string       `json:"name"`
-	Notes  string       `json:"notes"`
-	Source string       `json:"source"`
-	Status model.Status `json:"status"`
-	Unit   string       `json:"unit"`
-	Usage  model.Amount `json:"usage"`
+	Headroom model.Amount `json:"headroom"`
+	Key      string       `json:"key"`
+	Kind     model.Kind   `json:"kind"`
+	Label    string       `json:"label"`
+	Limit    model.Amount `json:"limit"`
+	Name     string       `json:"name"`
+	Notes    string       `json:"notes"`
+	OverBy   model.Amount `json:"over_by"`
+	Source   string       `json:"source"`
+	Status   model.Status `json:"status"`
+	Unit     string       `json:"unit"`
+	Usage    model.Amount `json:"usage"`
 }
 
-// WriteJSON renders readings as an indented JSON array followed by a newline,
-// for machine consumption.
+// WriteJSON renders readings, in the order given (the CLI ranks them first),
+// as an indented JSON array followed by a newline, for machine consumption.
 //
 // Each object carries every LimitReading field (including key, kind and
 // label, not just the display name) plus name, so a consumer gets both the
-// structured identity and the human string without rebuilding it. Unknown
+// structured identity and the human string without rebuilding it, and the
+// derived headroom and over_by. Unknown
 // amounts are null; known ones are exact integers. Empty input renders as
 // [], never null.
 func WriteJSON(w io.Writer, readings []model.LimitReading) error {
 	rows := make([]jsonRow, 0, len(readings))
 	for _, r := range readings {
+		headroom, overBy := model.UnknownAmount(), model.UnknownAmount()
+		if rem, over, ok := r.Headroom(); ok {
+			headroom, overBy = model.KnownAmount(rem), model.KnownAmount(over)
+		}
 		rows = append(rows, jsonRow{
-			Key:    r.Key,
-			Kind:   r.Kind,
-			Label:  r.Label,
-			Limit:  r.Limit,
-			Name:   DisplayName(r),
-			Notes:  r.Notes,
-			Source: r.Source,
-			Status: r.Status,
-			Unit:   r.Unit,
-			Usage:  r.Usage,
+			Headroom: headroom,
+			Key:      r.Key,
+			Kind:     r.Kind,
+			Label:    r.Label,
+			Limit:    r.Limit,
+			Name:     DisplayName(r),
+			Notes:    r.Notes,
+			OverBy:   overBy,
+			Source:   r.Source,
+			Status:   r.Status,
+			Unit:     r.Unit,
+			Usage:    r.Usage,
 		})
 	}
 	// An Encoder (rather than MarshalIndent) so HTML escaping can be turned

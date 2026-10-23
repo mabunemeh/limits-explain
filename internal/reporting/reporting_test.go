@@ -30,7 +30,7 @@ func reading(overrides func(*model.LimitReading)) model.LimitReading {
 func table(t *testing.T, readings ...model.LimitReading) string {
 	t.Helper()
 	var buf bytes.Buffer
-	if err := WriteTable(&buf, readings); err != nil {
+	if err := WriteTable(&buf, readings, 90); err != nil {
 		t.Fatalf("WriteTable: %v", err)
 	}
 	return buf.String()
@@ -100,9 +100,10 @@ func TestTableLayout(t *testing.T) {
 		}),
 	)
 	want := "limits-explain\n" +
-		"Name               Source  Limit      Usage  Unit   Status      Notes\n" +
-		"open files (soft)  rlimit  1024       n/a    files  unmeasured\n" +
-		"open files (hard)  rlimit  unlimited  n/a    files  unlimited\n"
+		"nearest ceiling: unknown (1 limit not measured)\n" +
+		"Name               Source  Limit      Usage  Headroom  Used  Unit   Status      Notes\n" +
+		"open files (soft)  rlimit  1024       n/a    n/a       n/a   files  unmeasured\n" +
+		"open files (hard)  rlimit  unlimited  n/a    n/a       n/a   files  unlimited\n"
 	if out != want {
 		t.Errorf("table mismatch\n got:\n%s\nwant:\n%s", out, want)
 	}
@@ -119,8 +120,11 @@ func TestTableHasNoTrailingWhitespace(t *testing.T) {
 
 func TestTableEmpty(t *testing.T) {
 	out := table(t)
-	if !strings.HasPrefix(out, "limits-explain\nName") || strings.Count(out, "\n") != 2 {
-		t.Errorf("empty table = %q", out)
+	want := "limits-explain\n" +
+		"nearest ceiling: none, no limits found\n" +
+		"Name  Source  Limit  Usage  Headroom  Used  Unit  Status  Notes\n"
+	if out != want {
+		t.Errorf("empty table = %q, want %q", out, want)
 	}
 }
 
@@ -178,10 +182,10 @@ func TestTableNeutralisesLayoutBreakers(t *testing.T) {
 				reading(nil),
 			)
 
-			// Exactly the title, the header and two rows: a newline in a
-			// cell must not add a line.
-			if got := strings.Count(out, "\n"); got != 4 {
-				t.Errorf("table has %d lines, want 4:\n%q", got, out)
+			// Exactly the title, the headline, the header and two rows: a
+			// newline in a cell must not add a line.
+			if got := strings.Count(out, "\n"); got != 5 {
+				t.Errorf("table has %d lines, want 5:\n%q", got, out)
 			}
 			if strings.ContainsAny(out, "\t\r\x1b\x00\f\v\u009b\u2028\u202e") {
 				t.Errorf("control character survived in %q", out)
@@ -190,8 +194,8 @@ func TestTableNeutralisesLayoutBreakers(t *testing.T) {
 			// And the layout survived: both rows put Source in the same
 			// column as the header does.
 			lines := strings.Split(out, "\n")
-			col := runeIndex(lines[1], "Source")
-			for _, line := range lines[2:4] {
+			col := runeIndex(lines[2], "Source")
+			for _, line := range lines[3:5] {
 				if got := runeIndex(line, "rlimit"); got != col {
 					t.Errorf("Source column at %d, header at %d:\n%s", got, col, out)
 				}
@@ -232,7 +236,7 @@ type failWriter struct{}
 func (failWriter) Write([]byte) (int, error) { return 0, errors.New("disk full") }
 
 func TestWritersReportWriteErrors(t *testing.T) {
-	if err := WriteTable(failWriter{}, nil); err == nil || !strings.Contains(err.Error(), "disk full") {
+	if err := WriteTable(failWriter{}, nil, 90); err == nil || !strings.Contains(err.Error(), "disk full") {
 		t.Errorf("WriteTable error = %v", err)
 	}
 	if err := WriteJSON(failWriter{}, nil); err == nil || !strings.Contains(err.Error(), "disk full") {
@@ -258,24 +262,28 @@ func TestJSONShape(t *testing.T) {
 
 	want := `[
   {
+    "headroom": null,
     "key": "rlimit.fsize.soft",
     "kind": "soft",
     "label": "open files",
     "limit": 18446744073709551614,
     "name": "open files (soft)",
     "notes": "",
+    "over_by": null,
     "source": "rlimit",
     "status": "unmeasured",
     "unit": "files",
     "usage": null
   },
   {
+    "headroom": null,
     "key": "rlimit.fsize.hard",
     "kind": "hard",
     "label": "open files",
     "limit": null,
     "name": "open files (hard)",
     "notes": "",
+    "over_by": null,
     "source": "rlimit",
     "status": "unlimited",
     "unit": "files",
