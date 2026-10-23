@@ -18,35 +18,6 @@ func reading(limit, usage Amount) LimitReading {
 	}
 }
 
-func TestConsumedFraction(t *testing.T) {
-	tests := []struct {
-		name   string
-		limit  Amount
-		usage  Amount
-		want   float64
-		wantOK bool
-	}{
-		{"basic", KnownAmount(1024), KnownAmount(512), 0.5, true},
-		{"limit unknown", UnknownAmount(), KnownAmount(512), 0, false},
-		{"usage unknown", KnownAmount(1024), UnknownAmount(), 0, false},
-		{"both unknown", UnknownAmount(), UnknownAmount(), 0, false},
-		// A zero limit must never divide by zero; it counts as fully
-		// consumed whatever the usage.
-		{"zero limit zero usage", KnownAmount(0), KnownAmount(0), 1.0, true},
-		{"zero limit some usage", KnownAmount(0), KnownAmount(5), 1.0, true},
-		{"can exceed one", KnownAmount(100), KnownAmount(150), 1.5, true},
-		{"max uint64", KnownAmount(math.MaxUint64), KnownAmount(math.MaxUint64), 1.0, true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, ok := reading(tc.limit, tc.usage).ConsumedFraction()
-			if ok != tc.wantOK || got != tc.want {
-				t.Errorf("ConsumedFraction() = (%v, %v), want (%v, %v)", got, ok, tc.want, tc.wantOK)
-			}
-		})
-	}
-}
-
 func TestDefaultStatus(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -2,7 +2,11 @@
 // reading of one limit from one source.
 package model
 
-import "strconv"
+import (
+	"math/big"
+	"math/bits"
+	"strconv"
+)
 
 // Kind says which half of a limit a reading represents.
 type Kind string
@@ -41,9 +45,9 @@ const (
 //     is nothing to measure usage against, and calling an unlimited reading
 //     "unmeasured" would imply a ceiling exists and has just not been
 //     checked yet.
-//  4. [StatusUnmeasured]: the limit is known but usage has not been
-//     collected. Every finite-limit reading is in this state until usage
-//     collection exists.
+//  4. [StatusUnmeasured]: the limit is known but usage is not, either
+//     because the source has no usage counter for it (cpu bandwidth, the
+//     rlimits) or because the counter could not be read or parsed.
 //  5. [StatusOK]: both limit and usage are known.
 type Status string
 
@@ -117,8 +121,9 @@ type LimitReading struct {
 	// with StatusUnparseable, when parsing failed; Status tells the two
 	// apart.
 	Limit Amount `json:"limit"`
-	// Usage is current usage. It is unknown until usage collection exists,
-	// so no reading carries a known Usage yet.
+	// Usage is current usage. It is unknown when the source has no usage
+	// counter for this limit or could not read it; Status says which. It is
+	// never guessed.
 	Usage Amount `json:"usage"`
 	// Unit is "files", "bytes", "seconds", "processes" and so on, or empty
 	// when the source has no unit for this row.
@@ -147,23 +152,106 @@ func DefaultStatus(limit, usage Amount) Status {
 	return StatusOK
 }
 
-// ConsumedFraction reports how much of Limit is already consumed by Usage.
-// 1.0 means fully at the ceiling; the result can exceed 1.0.
+// Measured reports whether both Limit and Usage are known, which is what
+// every calculation below requires.
+func (r LimitReading) Measured() bool { return r.Limit.Known && r.Usage.Known }
+
+// Headroom reports how much room is left under the limit, and by how much
+// usage has gone past it.
 //
-// The boolean is false when either Limit or Usage is unknown (unlimited,
-// unmeasured or unparseable). A Limit of zero is treated as fully consumed
-// (1.0) regardless of Usage, rather than dividing by zero.
-//
-// This is the quantity ranking sorts by: readings are ordered by which
-// ceiling is nearest, with unknown fractions sinking to the bottom. The
-// result is a float64, which loses precision above 2^53; it is a ranking
-// fraction, not an accounting value.
-func (r LimitReading) ConsumedFraction() (float64, bool) {
-	if !r.Limit.Known || !r.Usage.Known {
-		return 0, false
+// ok is false when Limit or Usage is unknown. Usage CAN exceed the limit (a
+// cgroup limit lowered below current usage, a zero ceiling), so the
+// subtraction is only done after the comparison: a bare limit-usage would
+// wrap around to a number near 2^64 and report an exhausted resource as
+// almost entirely free. At or over the limit, remaining is 0 and overBy is
+// the excess (also 0 at exactly the limit).
+func (r LimitReading) Headroom() (remaining, overBy uint64, ok bool) {
+	if !r.Measured() {
+		return 0, 0, false
 	}
+	if r.Usage.Value >= r.Limit.Value {
+		return 0, r.Usage.Value - r.Limit.Value, true
+	}
+	return r.Limit.Value - r.Usage.Value, 0, true
+}
+
+// AtOrAbove reports whether usage has reached percent of the limit, that is
+// usage*100 >= percent*limit. It is false for an unmeasured reading.
+//
+// Both products are formed in 128 bits and compared exactly, with no float64
+// anywhere: above 2^53 a float cannot tell limits 2^60 and 2^60+1 apart, so
+// a threshold decided in floating point can misjudge a reading at the
+// boundary. A zero limit is fully consumed at any usage, including zero, so
+// it is at or above every threshold; the right-hand side is 0 and the
+// comparison holds without a special case.
+func (r LimitReading) AtOrAbove(percent uint64) bool {
+	if !r.Measured() {
+		return false
+	}
+	uhi, ulo := bits.Mul64(r.Usage.Value, 100)
+	lhi, llo := bits.Mul64(percent, r.Limit.Value)
+	if uhi != lhi {
+		return uhi > lhi
+	}
+	return ulo >= llo
+}
+
+// fraction returns the consumed fraction of a measured reading as an exact
+// num/den pair. A zero limit is normalised to 1/1: fully consumed whatever
+// the usage, which also keeps the denominator non-zero.
+func (r LimitReading) fraction() (num, den uint64) {
 	if r.Limit.Value == 0 {
-		return 1.0, true
+		return 1, 1
 	}
-	return float64(r.Usage.Value) / float64(r.Limit.Value), true
+	return r.Usage.Value, r.Limit.Value
+}
+
+// CompareConsumed orders two measured readings by consumed fraction: it
+// returns -1, 0 or +1 as a is less than, equal to or greater than b. The
+// fractions u1/l1 and u2/l2 are compared by cross-multiplying (u1*l2 against
+// u2*l1) in 128 bits, so it is exact for any uint64 inputs. A zero limit
+// counts as fraction 1, as in [LimitReading.AtOrAbove]. It returns 0 if
+// either reading is not measured; callers separate those out first.
+func CompareConsumed(a, b LimitReading) int {
+	if !a.Measured() || !b.Measured() {
+		return 0
+	}
+	an, ad := a.fraction()
+	bn, bd := b.fraction()
+	ahi, alo := bits.Mul64(an, bd)
+	bhi, blo := bits.Mul64(bn, ad)
+	switch {
+	case ahi != bhi:
+		if ahi < bhi {
+			return -1
+		}
+		return 1
+	case alo < blo:
+		return -1
+	case alo > blo:
+		return 1
+	}
+	return 0
+}
+
+// Percent returns the consumed percentage as a decimal string with one digit
+// after the point, such as "62.0" or "112.5". The boolean is false for an
+// unmeasured reading.
+//
+// The value is FLOORED to a tenth of a percent, not rounded, and computed
+// exactly as floor(usage*1000/limit). Rounding would show "90.0" for a
+// reading at 89.96% that did not trip a --warn 90 check; flooring keeps the
+// display from ever being ahead of the decision. A zero limit shows
+// "100.0". Over 100% is shown as is. math/big is used because the permille
+// can exceed 64 bits (usage 2^64-1 against a limit of 1).
+func (r LimitReading) Percent() (string, bool) {
+	if !r.Measured() {
+		return "", false
+	}
+	num, den := r.fraction()
+	permille := new(big.Int).SetUint64(num)
+	permille.Mul(permille, big.NewInt(1000))
+	permille.Quo(permille, new(big.Int).SetUint64(den))
+	whole, tenth := new(big.Int).QuoRem(permille, big.NewInt(10), new(big.Int))
+	return whole.String() + "." + tenth.String(), true
 }
