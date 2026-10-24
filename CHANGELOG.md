@@ -38,6 +38,64 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **systemd source** (`internal/sources/systemd`): for a process in a system
+  unit, the unit's configured directives are added as NOTES on the rows they
+  set. It adds no rows and never changes a status, limit or usage, so ranking,
+  `--warn` and the gap count are unaffected. The unit is the rootmost
+  `.service` or `.scope` component of the process's cgroup path; a process
+  under `user@N.service` is not read, and neither are directives set on
+  ancestor slices. A directive that matches the kernel gets
+  `systemd: TasksMax=7 on a.service`; one that does not gets
+  `systemd: configured TasksMax=7 on a.service, effective 5`. Mapping:
+  `TasksMax` to `cgroup.pids.max`, `MemoryMax` to `cgroup.memory.max`,
+  `MemoryHigh` to `cgroup.memory.high`, `CPUQuotaPerSecUSec` to
+  `cgroup.cpu.max`, and `Limit<X>` / `Limit<X>Soft` to `rlimit.<x>.hard` /
+  `.soft` (or `.single` when soft and hard are equal, which then carries both
+  notes, merged into one when they agree).
+  - cgroup directives are compared with the kernel file at the UNIT's own
+    level, read through the same `fs.FS`, not with the level the row displays,
+    which can be an ancestor. `max` against a finite directive says
+    `effective max (not applied)`. `cpu.max` is compared exactly as
+    `directive_us * period == quota * 1_000_000` in 128 bits. systemd floors
+    the per-period quota to a whole microsecond (observed: `CPUQuota=33.33%`
+    with a 7ms period gives `2333 7000`), so a quota equal to
+    `floor(directive_us * period / 1_000_000)`, also computed in 128 bits, is
+    accepted with a note saying so. The kernel rounds `memory.max` and
+    `memory.high` DOWN to a whole page when they are written (observed:
+    10000001 became 9998336); a file value below the directive by less than a
+    page, for a page size (4 KiB, 16 KiB or 64 KiB) that divides it, is noted
+    as `consistent with rounding down to whole pages`, since the cause cannot
+    be checked from the files. A `.single` rlimit row whose soft and hard
+    directives are equal and both match gets one note, `(soft and hard)`.
+  - rlimits are compared with the row's limit, so `LimitNOFILE=infinity`
+    against the 2147483584 the kernel shows is reported as a mismatch.
+  - Numbers are all-ASCII-digit `uint64` or `infinity`; `CPUQuotaPerSecUSec` is
+    a space-separated timespan of `us`, `ms`, `s`, `min` and `h` tokens summed
+    to exact microseconds. A fraction that does not land on a whole
+    microsecond, an overflow, a sign, an exponent or any other form is
+    reported as `was not understood` and never guessed. A property this
+    systemd does not print is skipped silently.
+  - `systemctl show --no-pager -p <list> -- <unit>` is run with `LC_ALL=C`
+    and a 10 second timeout behind an injected `Runner`; nothing else is ever
+    executed and unit names are validated before any exec. Output is parsed
+    fail-closed: a line without `=`, a repeated key, or anything but
+    `LoadState=loaded` (a unit that does not exist exits 0 with default values)
+    fails the source, as does a `ControlGroup` that is neither the process's
+    cgroup nor an ancestor of it. A failure is one `systemd.source_error` row,
+    which counts as a gap like any other source's. No systemd as PID 1, or no
+    unit, is not an error and adds no row.
+  - The table gains one context line under the headline (and the warning
+    line): `unit: a.service`, `unit: a.service (directives not read)` or
+    `unit: none (<reason>)`. JSON is unchanged: a bare array of the same
+    objects. Under any `--root` other than `/` systemd is not consulted
+    (`unit: none (not consulted under --root)`).
+- **`show --unit NAME`**: resolves a unit to its main process and reports it
+  as `show <pid>` would. Exactly one of `<pid>` and `--unit` is required; the
+  name is validated first (letters, digits and `: _ . @ - \`, at most 255
+  bytes, never starting with `-`). Exit `2` for both or neither and for an
+  invalid name; exit `3` when systemd is not PID 1, the unit is not loaded
+  (`unit X not found`) or has no main process (`unit X has no main process`,
+  which includes scopes). Exit codes keep their meaning.
 - **Usage and headroom for memory and tasks.** The cgroup source now reads
   `memory.current` (for `memory.max` and `memory.high`) and `pids.current`
   (for `pids.max`), strictly parsed, at every level with a finite limit: each

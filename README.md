@@ -18,12 +18,14 @@ Requires Go 1.25 or newer.
 
 ```sh
 limits-explain show <pid>          # table
+limits-explain show --unit nginx   # the main process of a systemd unit
 limits-explain show <pid> --json   # machine-readable
 ```
 
 ```text
 limits-explain
 nearest ceiling: memory (high) 77.5% (620 of 800 bytes) (10 limits not measured)
+unit: nginx.service
 Name               Source  Limit    Usage  Headroom  Used   Unit       Status
 memory (high)      cgroup  800      620    180       77.5%  bytes      ok
 memory             cgroup  1000     620    380       62.0%  bytes      ok
@@ -49,6 +51,11 @@ memory  cgroup  100000  90000  10000  90.0%  bytes  ok  nearest its ceiling: /a 
 
 If any level's usage counter cannot be read the row stays unmeasured.
 
+For a process in a system unit, its systemd directives (`TasksMax`, `MemoryMax`,
+`MemoryHigh`, `CPUQuota`, `Limit<X>`) are added to the Notes of the rows they
+set, and say so when the kernel holds a different value; the `unit:` line names
+the unit or says why there is none.
+
 Exit codes:
 
 - `0` a report was produced and no measured reading is at or above `--warn`.
@@ -60,7 +67,8 @@ Exit codes:
   printed; unmeasured limits neither trigger nor suppress it.
 - `2` usage error.
 - `3` nothing could be reported, because the process does not exist or every
-  source failed. Nothing is written to stdout.
+  source failed, or `--unit` names a unit that is not loaded or has no main
+  process. Nothing is written to stdout.
 - `4` the results could not be written; this wins over `1`.
 
 ## Scope
@@ -68,7 +76,7 @@ Exit codes:
 Linux only: the tool reads `/proc` and `/sys/fs/cgroup`. Cgroups are read from
 the v2 unified hierarchy only. On a cgroup v1 or hybrid host the cgroup limits
 show as a single `cgroup.source_error` row and the rlimits are still reported.
-Host processes and system units, not containers.
+Host processes and system units, not containers or user-manager units.
 
 ## Alternatives
 
