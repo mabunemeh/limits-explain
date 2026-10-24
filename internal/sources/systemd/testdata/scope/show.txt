@@ -1,0 +1,9 @@
+Id=le-scope.scope
+LoadState=loaded
+ActiveState=active
+ControlGroup=/system.slice/le-scope.scope
+CPUQuotaPerSecUSec=infinity
+CPUQuotaPeriodUSec=infinity
+MemoryHigh=infinity
+MemoryMax=infinity
+TasksMax=9
