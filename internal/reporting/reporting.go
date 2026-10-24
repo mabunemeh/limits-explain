@@ -165,6 +165,13 @@ func warnLine(s ranking.Summary, warn uint64) string {
 // warn is the --warn percentage; it only decides whether the warning line
 // appears.
 func WriteTable(w io.Writer, readings []model.LimitReading, warn uint64) error {
+	return WriteTableContext(w, readings, warn, "")
+}
+
+// WriteTableContext is [WriteTable] with one extra context line, such as
+// "unit: a.service", printed after the headline (and the warning line, when
+// there is one) and before the table. An empty context prints no line.
+func WriteTableContext(w io.Writer, readings []model.LimitReading, warn uint64, context string) error {
 	var buf bytes.Buffer
 	tw := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
 
@@ -209,6 +216,9 @@ func WriteTable(w io.Writer, readings []model.LimitReading, warn uint64) error {
 	out.WriteString(headline(sum) + "\n")
 	if line := warnLine(sum, warn); line != "" {
 		out.WriteString(line + "\n")
+	}
+	if context != "" {
+		out.WriteString(cell(context) + "\n")
 	}
 	for _, line := range strings.SplitAfter(buf.String(), "\n") {
 		out.WriteString(strings.TrimRight(line, " \n"))

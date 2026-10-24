@@ -21,6 +21,7 @@ import (
 	"github.com/mabunemeh/limits-explain/internal/reporting"
 	"github.com/mabunemeh/limits-explain/internal/sources"
 	"github.com/mabunemeh/limits-explain/internal/sources/registry"
+	"github.com/mabunemeh/limits-explain/internal/sources/systemd"
 )
 
 // Exit codes.
@@ -65,6 +66,11 @@ func (e *exitError) Unwrap() error { return e.err }
 // that fails on demand.
 type rootOpener func(root string) fs.FS
 
+// runnerOpener chooses how systemd is asked about a unit for the given --root.
+// It returns nil when systemd must not be consulted. It is a parameter, like
+// rootOpener, so tests can inject a fake that replays captured output.
+type runnerOpener func(root string) systemd.Runner
+
 // Execute runs the CLI with the given arguments (without the program name),
 // writing results to stdout and errors to stderr, and returns the exit code.
 //
@@ -93,16 +99,26 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	// an untrusted tree can still read files outside it. That is acceptable
 	// because --root is a hidden testing flag and the real /sys/fs/cgroup
 	// holds no symlinks; it would not be if --root ever became a feature.
-	return execute(args, stdout, stderr, func(root string) fs.FS { return os.DirFS(root) })
+	return execute(args, stdout, stderr,
+		func(root string) fs.FS { return os.DirFS(root) },
+		// systemctl talks to the live host, so it is only asked when the
+		// sources read the live host too. Under any other --root the systemd
+		// step reports that it was not consulted.
+		func(root string) systemd.Runner {
+			if root == "/" {
+				return systemd.ExecRunner{}
+			}
+			return nil
+		})
 }
 
-func execute(args []string, stdout, stderr io.Writer, open rootOpener) int {
+func execute(args []string, stdout, stderr io.Writer, open rootOpener, runner runnerOpener) int {
 	if args == nil {
 		// cobra falls back to os.Args[1:] for a nil slice. An empty,
 		// non-nil slice means "no arguments".
 		args = []string{}
 	}
-	cmd := newRootCmd(stdout, stderr, open)
+	cmd := newRootCmd(stdout, stderr, open, runner)
 	cmd.SetArgs(args)
 
 	err := cmd.Execute()
@@ -126,7 +142,7 @@ func execute(args []string, stdout, stderr io.Writer, open rootOpener) int {
 	return code
 }
 
-func newRootCmd(stdout, stderr io.Writer, open rootOpener) *cobra.Command {
+func newRootCmd(stdout, stderr io.Writer, open rootOpener, runner runnerOpener) *cobra.Command {
 	root := &cobra.Command{
 		Use:   progName,
 		Short: "Show every limit binding a Linux process",
@@ -141,7 +157,7 @@ func newRootCmd(stdout, stderr io.Writer, open rootOpener) *cobra.Command {
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	root.CompletionOptions.DisableDefaultCmd = true
-	root.AddCommand(newShowCmd(stdout, open))
+	root.AddCommand(newShowCmd(stdout, open, runner))
 	return root
 }
 
@@ -149,18 +165,27 @@ type showOptions struct {
 	root string
 	json bool
 	warn string
+	unit string
 }
 
 // defaultWarn is the --warn percentage when the flag is not given.
 const defaultWarn = "90"
 
-func newShowCmd(stdout io.Writer, open rootOpener) *cobra.Command {
+func newShowCmd(stdout io.Writer, open rootOpener, runner runnerOpener) *cobra.Command {
 	var opts showOptions
 
 	cmd := &cobra.Command{
-		Use:   "show <pid>",
-		Short: "Show every limit binding pid, with usage where available",
+		Use:   "show <pid> | --unit NAME",
+		Short: "Show every limit binding a process or a systemd unit, with usage where available",
 		Long: `Show every limit binding pid, with usage where available.
+
+Give exactly one of <pid> or --unit NAME. --unit resolves a systemd unit to
+its main process and then reports that process. When the process belongs to a
+system unit, the unit's systemd directives (TasksMax, MemoryMax, MemoryHigh,
+CPUQuota, Limit<X>) are added as notes on the cgroup and rlimit rows they set,
+and say so when the kernel holds a different value. They never add a row. A
+"unit:" line under the headline names the unit, or says why there is none.
+A systemctl that fails or prints garbage becomes a "systemd.source_error" row.
 
 Exit codes:
   0  a report was produced and no measured reading is at or above --warn. It
@@ -174,26 +199,39 @@ Exit codes:
      limit. The report is still printed (table or --json); a one-line message
      goes to stderr. Unmeasured limits do not count toward it, and do not
      suppress it.
-  2  usage error (missing, non-integer or non-positive pid; unknown flag;
-     --warn not an integer from 1 to 100)
+  2  usage error (missing, non-integer or non-positive pid; both or neither of
+     <pid> and --unit; an invalid unit name; unknown flag; --warn not an
+     integer from 1 to 100)
   3  nothing could be reported: the process does not exist, or EVERY source
-     failed to read or parse its limits. Nothing is written to stdout.
+     failed to read or parse its limits; with --unit, also when systemd is not
+     PID 1, the unit is not found, or it has no main process. Nothing is
+     written to stdout.
   4  the results could not be written (for example a full disk); this wins
      over 1
 
 Readings are ranked nearest ceiling first.`,
-		Args: func(_ *cobra.Command, args []string) error {
-			switch {
-			case len(args) == 0:
-				return errors.New("missing pid argument")
-			case len(args) > 1:
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 1 {
 				return fmt.Errorf("expected one pid, got %d arguments", len(args))
+			}
+			byUnit := cmd.Flags().Changed("unit")
+			switch {
+			case byUnit && len(args) == 1:
+				return errors.New("give either a pid or --unit, not both")
+			case !byUnit && len(args) == 0:
+				return errors.New("missing pid argument (or --unit NAME)")
 			}
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			pid, err := parsePID(args[0])
-			if err != nil {
+			byUnit := cmd.Flags().Changed("unit")
+			var pid int
+			if !byUnit {
+				var err error
+				if pid, err = parsePID(args[0]); err != nil {
+					return err
+				}
+			} else if err := systemd.ValidateUnitName(opts.unit); err != nil {
 				return err
 			}
 			// An empty --root must be rejected, not quietly treated as the
@@ -205,9 +243,16 @@ Readings are ranked nearest ceiling first.`,
 			if err != nil {
 				return err
 			}
-			return runShow(stdout, open(opts.root), opts.root, pid, opts.json, warn)
+			fsys, run := open(opts.root), runner(opts.root)
+			if byUnit {
+				if pid, err = systemd.MainPID(run, fsys, opts.unit); err != nil {
+					return &exitError{exitTarget, err}
+				}
+			}
+			return runShow(stdout, fsys, opts.root, pid, opts.json, warn, run)
 		},
 	}
+	cmd.Flags().StringVar(&opts.unit, "unit", "", "show the main process of the systemd unit `NAME` instead of a pid")
 	cmd.Flags().BoolVar(&opts.json, "json", false, "print machine-readable JSON instead of a table")
 	// A string flag, not cobra's Uint: pflag parses integers with base 0, so
 	// "0x5a" would be accepted and "090" read as octal. parseWarn applies the
@@ -248,7 +293,8 @@ func parseWarn(arg string) (uint64, error) {
 	return v, nil
 }
 
-func runShow(stdout io.Writer, fsys fs.FS, rootLabel string, pid int, asJSON bool, warn uint64) error {
+func runShow(stdout io.Writer, fsys fs.FS, rootLabel string, pid int, asJSON bool, warn uint64,
+	run systemd.Runner) error {
 	// The existence check uses the same fs.FS the sources read through, so a
 	// fixture tree and the real filesystem behave identically.
 	pidDir := fmt.Sprintf("proc/%d", pid)
@@ -294,14 +340,21 @@ func runShow(stdout io.Writer, fsys fs.FS, rootLabel string, pid int, asJSON boo
 	// threshold, so it cannot be borrowed to mean "partial" either: the gap
 	// is counted in the headline instead.
 
+	// systemd only annotates what the other sources found, so it runs last.
+	// It adds notes and no rows, except when it fails: then it is one more
+	// source_error row, a visible gap like any other source's.
+	readings, unitCtx, err := systemd.Consult(run, pid, fsys, readings)
+	if err != nil {
+		readings = append(readings, sourceFailure(systemd.Name, err))
+	}
+
 	// Everything is collected before anything is printed, so a failure never
 	// leaves partial output on stdout.
 	ranked := ranking.Rank(readings)
-	var err error
 	if asJSON {
 		err = reporting.WriteJSON(stdout, ranked)
 	} else {
-		err = reporting.WriteTable(stdout, ranked, warn)
+		err = reporting.WriteTableContext(stdout, ranked, warn, unitCtx.Line())
 	}
 	// A render failure wins over the threshold: the caller must learn the
 	// report did not arrive before they learn what it said.

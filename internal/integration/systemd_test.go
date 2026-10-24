@@ -10,13 +10,17 @@
 // It is behind the "integration" build tag AND skips at run time unless PID 1
 // is systemd (GitHub Actions ubuntu-latest runners qualify; a developer
 // laptop running another init system does not), since it spawns and stops a
-// real transient unit through sudo systemd-run. Run it with:
+// real transient unit through sudo systemd-run. The CLI tests go further and
+// run the in-process CLI against the live host with the real systemctl runner.
+// Run it with:
 //
 //	go test -tags=integration -v ./internal/integration/...
 package integration
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"strconv"
@@ -24,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mabunemeh/limits-explain/internal/cli"
 	"github.com/mabunemeh/limits-explain/internal/sources/rlimits"
 )
 
@@ -107,4 +112,96 @@ func TestTransientUnitRlimitsAreReadable(t *testing.T) {
 		}
 	}
 	t.Errorf("no rlimit.nproc.* key among %d readings", len(readings))
+}
+
+// startUnit starts a transient unit with the given properties and returns its
+// MainPID. The unit is stopped when the test ends.
+func startUnit(t *testing.T, name string, props ...string) int {
+	t.Helper()
+	args := []string{"systemd-run", "--quiet", "--unit=" + name}
+	for _, p := range props {
+		args = append(args, "--property="+p)
+	}
+	args = append(args, "sleep", "30")
+	if out, err := output("sudo", args...); err != nil {
+		t.Fatalf("systemd-run: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		if out, err := output("sudo", "systemctl", "stop", name); err != nil {
+			t.Logf("stopping %s: %v\n%s", name, err, out)
+		}
+	})
+	return waitForMainPID(t, name)
+}
+
+// show runs the in-process CLI against the live host: the default root, so the
+// real systemctl runner is used.
+func show(args ...string) (int, string, string) {
+	var stdout, stderr bytes.Buffer
+	code := cli.Execute(args, &stdout, &stderr)
+	return code, stdout.String(), stderr.String()
+}
+
+func notesByKey(t *testing.T, stdout string) map[string]string {
+	t.Helper()
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(stdout), &rows); err != nil {
+		t.Fatalf("stdout is not a JSON array: %v\n%s", err, stdout)
+	}
+	notes := map[string]string{}
+	for _, row := range rows {
+		key, _ := row["key"].(string)
+		notes[key], _ = row["notes"].(string)
+	}
+	return notes
+}
+
+func TestCLIAnnotatesATransientUnit(t *testing.T) {
+	if !isSystemdPID1() {
+		t.Skip("requires a real systemd PID 1")
+	}
+	const name = "limits-explain-cli"
+	pid := startUnit(t, name, "TasksMax=7", "LimitNOFILE=4096:8192")
+
+	want := map[string]string{
+		"cgroup.pids.max":    "systemd: TasksMax=7 on " + name + ".service",
+		"rlimit.nofile.soft": "systemd: LimitNOFILESoft=4096 on " + name + ".service",
+		"rlimit.nofile.hard": "systemd: LimitNOFILE=8192 on " + name + ".service",
+	}
+	check := func(t *testing.T, args ...string) {
+		t.Helper()
+		code, stdout, stderr := show(args...)
+		if code != 0 {
+			t.Fatalf("exit %d, stderr: %s\n%s", code, stderr, stdout)
+		}
+		notes := notesByKey(t, stdout)
+		if note, ok := notes["systemd.source_error"]; ok {
+			t.Errorf("systemd failed: %s", note)
+		}
+		for key, text := range want {
+			if !strings.Contains(notes[key], text) {
+				t.Errorf("%s notes = %q, want them to contain %q", key, notes[key], text)
+			}
+		}
+	}
+	t.Run("by pid", func(t *testing.T) { check(t, "show", strconv.Itoa(pid), "--json") })
+	t.Run("by unit", func(t *testing.T) { check(t, "show", "--unit", name+".service", "--json") })
+	t.Run("by bare unit name", func(t *testing.T) { check(t, "show", "--unit", name, "--json") })
+
+	t.Run("table names the unit", func(t *testing.T) {
+		code, stdout, stderr := show("show", strconv.Itoa(pid))
+		if code != 0 || !strings.Contains(stdout, "\nunit: "+name+".service\n") {
+			t.Errorf("exit %d, stderr %q\n%s", code, stderr, stdout)
+		}
+	})
+}
+
+func TestCLIUnitNotFound(t *testing.T) {
+	if !isSystemdPID1() {
+		t.Skip("requires a real systemd PID 1")
+	}
+	code, stdout, stderr := show("show", "--unit", "limits-explain-no-such-unit.service")
+	if code != 3 || stdout != "" || !strings.Contains(stderr, "not found") {
+		t.Errorf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
 }

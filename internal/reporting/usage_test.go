@@ -208,3 +208,39 @@ func decode(t *testing.T, data []byte) []map[string]string {
 	}
 	return rows
 }
+
+func TestWriteTableContextLine(t *testing.T) {
+	rows := []model.LimitReading{measured("tasks", 100, 95)}
+	render := func(ctx string) []string {
+		var buf bytes.Buffer
+		if err := WriteTableContext(&buf, rows, 90, ctx); err != nil {
+			t.Fatalf("WriteTableContext: %v", err)
+		}
+		return strings.Split(buf.String(), "\n")
+	}
+
+	// The context line follows the headline and the warning line, and comes
+	// before the table.
+	got := render("unit: a.service")
+	if got[0] != "limits-explain" || !strings.HasPrefix(got[1], "nearest ceiling:") ||
+		!strings.HasPrefix(got[2], "warning:") || got[3] != "unit: a.service" || !strings.HasPrefix(got[4], "Name") {
+		t.Errorf("layout = %q", got[:5])
+	}
+
+	// An empty context prints nothing, which is exactly what WriteTable does.
+	var plain, empty bytes.Buffer
+	if err := WriteTable(&plain, rows, 90); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteTableContext(&empty, rows, 90, ""); err != nil {
+		t.Fatal(err)
+	}
+	if plain.String() != empty.String() || strings.Contains(plain.String(), "unit:") {
+		t.Errorf("empty context changed the output:\n%s", plain.String())
+	}
+
+	// The line is dynamic text, so control characters are neutralised.
+	if got := render("unit: a\x1b[31m\nb")[3]; strings.ContainsAny(got, "\x1b") || strings.Contains(got, "\n") {
+		t.Errorf("context not sanitised: %q", got)
+	}
+}

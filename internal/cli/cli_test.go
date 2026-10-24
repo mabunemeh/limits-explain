@@ -14,6 +14,7 @@ import (
 
 	"github.com/mabunemeh/limits-explain/internal/model"
 	"github.com/mabunemeh/limits-explain/internal/sources"
+	"github.com/mabunemeh/limits-explain/internal/sources/systemd"
 )
 
 // fixtureRoot returns the --root value for a committed rlimits fixture tree.
@@ -300,7 +301,8 @@ func TestProcessDyingBetweenStatAndReadExitsThree(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			open := func(root string) fs.FS { return failingFS{os.DirFS(root), tc.err} }
-			code := execute([]string{"show", "4242", "--root", fixtureRoot(t, "basic")}, &stdout, &stderr, open)
+			code := execute([]string{"show", "4242", "--root", fixtureRoot(t, "basic")}, &stdout, &stderr, open,
+				func(string) systemd.Runner { return nil })
 			if code != 3 {
 				t.Errorf("exit %d, want 3", code)
 			}
