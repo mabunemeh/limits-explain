@@ -20,6 +20,7 @@ import (
 	"github.com/mabunemeh/limits-explain/internal/ranking"
 	"github.com/mabunemeh/limits-explain/internal/reporting"
 	"github.com/mabunemeh/limits-explain/internal/sources"
+	"github.com/mabunemeh/limits-explain/internal/sources/fds"
 	"github.com/mabunemeh/limits-explain/internal/sources/registry"
 	"github.com/mabunemeh/limits-explain/internal/sources/systemd"
 )
@@ -339,6 +340,12 @@ func runShow(stdout io.Writer, fsys fs.FS, rootLabel string, pid int, asJSON boo
 	// degraded row. And exit 1 means a measured reading is at or above the
 	// threshold, so it cannot be borrowed to mean "partial" either: the gap
 	// is counted in the headline instead.
+
+	// The fd pass fills usage on rows the rlimit source produced, so it runs
+	// after the registry loop and before systemd, which then annotates the
+	// finished rows. With no matching rows it reads nothing. Its failures
+	// are notes, never rows or errors: those rows were already gaps.
+	readings = fds.Apply(pid, fsys, readings)
 
 	// systemd only annotates what the other sources found, so it runs last.
 	// It adds notes and no rows, except when it fails: then it is one more
