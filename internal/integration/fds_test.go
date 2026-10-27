@@ -10,9 +10,11 @@ import (
 )
 
 // TestCLIMeasuresOwnOpenFiles runs the CLI on the test process against the
-// real root. The process always holds stdin, stdout and stderr, so a measured
-// rlimit.nofile.soft must show at least three descriptors. Exit 1 is allowed:
-// a busy host can legitimately have another reading over --warn.
+// real root. The process always holds stdin, stdout and stderr, so the soft
+// open-files row must be measured with at least three descriptors. That row
+// is rlimit.nofile.single when soft equals hard, as on GitHub's runners, and
+// rlimit.nofile.soft otherwise. Exit 1 is allowed: a busy host can
+// legitimately have another reading over --warn.
 func TestCLIMeasuresOwnOpenFiles(t *testing.T) {
 	code, stdout, stderr := show("show", strconv.Itoa(os.Getpid()), "--json")
 	if code != 0 && code != 1 {
@@ -27,13 +29,13 @@ func TestCLIMeasuresOwnOpenFiles(t *testing.T) {
 		t.Fatalf("stdout is not a JSON array: %v\n%s", err, stdout)
 	}
 	for _, r := range rows {
-		if r.Key != "rlimit.nofile.soft" {
+		if r.Key != "rlimit.nofile.soft" && r.Key != "rlimit.nofile.single" {
 			continue
 		}
 		if r.Status != "ok" || r.Usage == nil || *r.Usage < 3 {
-			t.Fatalf("rlimit.nofile.soft = status %q usage %v, want ok and >= 3", r.Status, r.Usage)
+			t.Fatalf("%s = status %q usage %v, want ok and >= 3", r.Key, r.Status, r.Usage)
 		}
 		return
 	}
-	t.Fatal("no rlimit.nofile.soft row in the report")
+	t.Fatal("no rlimit.nofile.soft or rlimit.nofile.single row in the report")
 }
