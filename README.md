@@ -36,10 +36,12 @@ stack size (soft)  rlimit  8388608  n/a    n/a       n/a    bytes      unmeasure
 
 Readings are ranked nearest ceiling first, then the limits that could not be
 measured, then the unlimited ones. Usage is read for the cgroup memory and
-task limits, at every level that has one; the rlimit rows are limits only for now and count as not
-measured. The headline names how many were not measured whenever any were, so a report is
-never an all-clear on its own. `--warn PERCENT` (default 90, 1-100) sets the
-threshold for exit `1`.
+task limits, at every level that has one, and for open files (the
+`/proc/<pid>/fd` count); the other rlimit rows count as not measured.
+`RLIMIT_NPROC` is per-user, so its rows carry a note with the thread count
+instead of usage. The headline names how many were not measured whenever any
+were, so a report is never an all-clear on its own. `--warn PERCENT` (default
+90, 1-100) sets the threshold for exit `1`.
 
 A cgroup row shows the level nearest its ceiling (by usage/limit, the
 rootmost on a tie), which can be an ancestor looser than the tightest limit,

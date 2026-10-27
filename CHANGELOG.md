@@ -8,6 +8,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The open-files rows are now measured**, so they rank, no longer count as
+  gaps in the headline, and can trip `--warn`. Scripts may see exit `1` where
+  they saw `0`: a process using 90% or more of its `RLIMIT_NOFILE` now exits
+  `1`.
 - **Exit `1` is now returned.** It means at least one MEASURED reading is at
   or above `--warn` percent of its limit (default 90). The report is printed
   first (table or `--json`) and a one-line message goes to stderr, with no
@@ -37,6 +41,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rather than treating exit `0` as "every limit was read".
 
 ### Added
+
+- **fd usage on the open-files rows** (`internal/sources/fds`, a pass that runs
+  after the other sources and before systemd). `rlimit.nofile.soft`, `.hard`
+  and `.single` get the number of entries in `/proc/<pid>/fd` as usage. The
+  directory is only listed, never opened per entry (entries are symlinks, and
+  `os.DirFS` follows them out of the root); any entry name that is not ASCII
+  digits fails closed, with no usage and a note. If fds are numbered at or
+  above the soft limit (`prlimit` can lower it below open fds) they are
+  counted and noted, since the count then overstates how close the next
+  `open()` is. An unlimited row is left untouched. An unreadable fd directory
+  (another user's process) is a note on the rows, which stay unmeasured, never
+  a `source_error` row.
+- **Thread notes.** The `rlimit.nproc` rows stay unmeasured: the limit is per
+  real uid across every task of that user, not per process, and a `/proc` scan
+  would undercount silently under `hidepid` or a PID namespace. Their note
+  gives the real uid and this process's thread count (from
+  `/proc/<pid>/status`, parsed strictly) and says it is not enforced for uid 0.
+  `cgroup.pids.max` gets a "this process has N threads" note.
 
 - **systemd source** (`internal/sources/systemd`): for a process in a system
   unit, the unit's configured directives are added as NOTES on the rows they
