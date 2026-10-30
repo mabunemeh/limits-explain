@@ -507,3 +507,20 @@ func TestSourceFailureStatusFollowsTheErrorKind(t *testing.T) {
 		})
 	}
 }
+
+func TestVersion(t *testing.T) {
+	saved := version
+	t.Cleanup(func() { version = saved })
+
+	version = "v9.8.7"
+	res := run("--version")
+	if res.code != 0 || res.stdout != "limits-explain v9.8.7\n" || res.stderr != "" {
+		t.Errorf("stamped: exit %d, stdout %q, stderr %q", res.code, res.stdout, res.stderr)
+	}
+
+	// A test binary records no module version, so an unstamped build says dev.
+	version = ""
+	if got := run("--version").stdout; got != "limits-explain dev\n" {
+		t.Errorf("unstamped: stdout %q, want %q", got, "limits-explain dev\n")
+	}
+}

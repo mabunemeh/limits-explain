@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 
@@ -50,6 +51,23 @@ const (
 )
 
 const progName = "limits-explain"
+
+// version is stamped by the release build with
+// -ldflags "-X github.com/mabunemeh/limits-explain/internal/cli.version=...".
+// An unstamped build falls back to the version Go recorded: the module version
+// for `go install ...@v0.1.0`, a commit pseudo-version for `go build` in a git
+// checkout. Only a build with neither, such as a test binary, says "dev".
+var version = ""
+
+func resolveVersion() string {
+	if version != "" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return bi.Main.Version
+	}
+	return "dev"
+}
 
 // exitError carries the exit code a command wants. Any error that is not an
 // exitError (in practice, the ones cobra itself produces for bad flags and
@@ -154,7 +172,9 @@ func newRootCmd(stdout, stderr io.Writer, open rootOpener, runner runnerOpener) 
 		// Use the root command as a plain container for subcommands.
 		// "limits-explain <pid>" is deliberately not accepted: later
 		// batches add options to show, such as --unit.
+		Version: resolveVersion(),
 	}
+	root.SetVersionTemplate(progName + " {{.Version}}\n")
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	root.CompletionOptions.DisableDefaultCmd = true

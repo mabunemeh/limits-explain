@@ -1,0 +1,34 @@
+# Release build for limits-explain. Run by .github/workflows/release.yml on a
+# v* tag; check locally with `goreleaser release --snapshot --clean`.
+version: 2
+
+project_name: limits-explain
+
+builds:
+  - main: ./cmd/limits-explain
+    env:
+      # Static binary: runs on any Linux regardless of its glibc version.
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      # {{.Version}} drops the tag's "v"; add it back so --version matches what
+      # `go install ...@v0.1.0` reports.
+      - -s -w -X github.com/mabunemeh/limits-explain/internal/cli.version=v{{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [LICENSE, README.md, CHANGELOG.md]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  # Release notes come from CHANGELOG.md, not from commit subjects.
+  disable: true
+
+release:
+  # v0.1.0-rc.1 and similar tags are published as GitHub pre-releases.
+  prerelease: auto

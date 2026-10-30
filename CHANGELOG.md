@@ -42,6 +42,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`--version`** prints `limits-explain <version>`. Release binaries are
+  stamped with the tag; other builds report the version Go recorded (the
+  module version for `go install ...@vX.Y.Z`, a commit pseudo-version for
+  `go build` in a git checkout), or `dev` when there is none.
+- **Release pipeline.** Pushing a `v*` tag runs the tests, then goreleaser
+  publishes a GitHub release with static (`CGO_ENABLED=0`) linux amd64 and
+  arm64 tarballs and a `checksums.txt`. Tags with a pre-release suffix such as
+  `-rc.1` are marked as pre-releases.
 - **fd usage on the open-files rows** (`internal/sources/fds`, a pass that runs
   after the other sources and before systemd). `rlimit.nofile.soft`, `.hard`
   and `.single` get the number of entries in `/proc/<pid>/fd` as usage. The
