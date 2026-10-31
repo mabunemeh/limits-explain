@@ -19,20 +19,26 @@ Requires Go 1.25 or newer.
 ```sh
 limits-explain show <pid>          # table
 limits-explain show --unit nginx   # the main process of a systemd unit
-limits-explain show <pid> --json   # machine-readable
+limits-explain show <pid> --json   # machine-readable, exact integers
+limits-explain show <pid> --wide   # Notes in full on a terminal
 ```
 
 ```text
 limits-explain
-nearest ceiling: memory (high) 77.5% (620 of 800 bytes) (10 limits not measured)
+nearest ceiling: memory (high) 77.5% (620.0 MiB of 800.0 MiB) (1 limit not measured)
 unit: nginx.service
-Name               Source  Limit    Usage  Headroom  Used   Unit       Status
-memory (high)      cgroup  800      620    180       77.5%  bytes      ok
-memory             cgroup  1000     620    380       62.0%  bytes      ok
-tasks              cgroup  100      9      91        9.0%   processes  ok
-stack size (soft)  rlimit  8388608  n/a    n/a       n/a    bytes      unmeasured
-...
+Name               Source  Limit      Usage      Headroom   Used   Unit       Status      Notes
+memory (high)      cgroup  800.0 MiB  620.0 MiB  180.0 MiB  77.5%  bytes      ok          systemd...
+memory             cgroup  1.0 GiB    620.0 MiB  404.0 MiB  60.5%  bytes      ok          nearest...
+tasks              cgroup  100        9          91         9.0%   processes  ok
+stack size (soft)  rlimit  8.0 MiB    n/a        n/a        n/a    bytes      unmeasured
+notes truncated to fit 100 columns; --wide shows them in full
 ```
+
+On a terminal the Notes column is cut to fit (at least 10 columns are kept),
+and the last line says so; `--wide` shows it in full, and piped output is never
+cut. Byte amounts are shown as `B` or `KiB` to `EiB` with one decimal, rounded
+down, in the table only.
 
 Readings are ranked nearest ceiling first, then the limits that could not be
 measured, then the unlimited ones. Usage is read for the cgroup memory and
@@ -57,6 +63,21 @@ For a process in a system unit, its systemd directives (`TasksMax`, `MemoryMax`,
 `MemoryHigh`, `CPUQuota`, `Limit<X>`) are added to the Notes of the rows they
 set, and say so when the kernel holds a different value; the `unit:` line names
 the unit or says why there is none.
+
+`--json` prints one object, keys in alphabetical order:
+
+```json
+{
+  "pid": 4242,
+  "readings": [],
+  "summary": {"nearest": null, "not_measured": 0, "total": 0, "warned": 0},
+  "unit": {"directives_read": false, "name": null, "reason": "not consulted under --root"},
+  "warn": 90
+}
+```
+
+`readings` holds every row with exact integers (`null` for unknown amounts).
+`summary.nearest` is the `key` of the nearest-ceiling reading, or `null`.
 
 Exit codes:
 

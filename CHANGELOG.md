@@ -8,6 +8,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **BREAKING: `--json` is now an object, not a bare array.** The old array is
+  under `readings` and is unchanged. New top-level keys, all alphabetical:
+  `pid`, `summary` (`nearest`: the `key` of the nearest-ceiling reading or
+  `null`; `not_measured`; `total`; `warned`), `unit` (`directives_read`;
+  `name` and `reason`, `null` when not applicable) and `warn`. Scripts that
+  indexed the top-level array must read `.readings` instead. Exit `3` still
+  prints nothing.
+- **Table: Notes are cut to the terminal width, and bytes are humanized.**
+  When stdout is a terminal, only the Notes cell is cut (ending in `...`, at
+  least 10 columns kept) and a last line says so; `--wide` shows them in full.
+  Piped output and `--json` are never cut. Limit, Usage and Headroom cells
+  (including `over by`) and the headline show `bytes` amounts as `B` or
+  `KiB` to `EiB` with one decimal, rounded down so a value below its limit
+  never prints equal to it. Other units, the Unit and Notes columns and the
+  JSON stay exact.
 - **The open-files rows are now measured**, so they rank, no longer count as
   gaps in the headline, and can trip `--warn`. Scripts may see exit `1` where
   they saw `0`: a process using 90% or more of its `RLIMIT_NOFILE` now exits
