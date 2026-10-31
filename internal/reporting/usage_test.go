@@ -28,7 +28,7 @@ func unlimited(label string) model.LimitReading {
 func tableWarn(t *testing.T, warn uint64, readings ...model.LimitReading) string {
 	t.Helper()
 	var buf bytes.Buffer
-	if err := WriteTable(&buf, readings, warn); err != nil {
+	if err := WriteTable(&buf, readings, warn, TableOptions{}); err != nil {
 		t.Fatalf("WriteTable: %v", err)
 	}
 	return buf.String()
@@ -156,7 +156,7 @@ func TestJSONHeadroomAndOverBy(t *testing.T) {
 		measured("under", 100, 62),
 		measured("exact", 7, 7),
 		reading(nil),
-	})
+	}, JSONOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,14 +174,23 @@ func TestJSONHeadroomAndOverBy(t *testing.T) {
 
 func TestJSONKeepsGivenOrderAndAlphabeticalFields(t *testing.T) {
 	var buf bytes.Buffer
-	if err := WriteJSON(&buf, []model.LimitReading{measured("zzz", 10, 1), measured("aaa", 10, 2)}); err != nil {
+	if err := WriteJSON(&buf, []model.LimitReading{measured("zzz", 10, 1), measured("aaa", 10, 2)}, JSONOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
 	if strings.Index(out, `"zzz"`) > strings.Index(out, `"aaa"`) {
 		t.Errorf("WriteJSON reordered its input:\n%s", out)
 	}
+	// Top-level keys are indented two spaces; no reading key is.
 	last := -1
+	for _, f := range []string{"pid", "readings", "summary", "unit", "warn"} {
+		i := strings.Index(out, "\n  \""+f+"\":")
+		if i < 0 || i < last {
+			t.Fatalf("top-level key %q missing or out of alphabetical order in:\n%s", f, out)
+		}
+		last = i
+	}
+	last = -1
 	for _, f := range []string{"headroom", "key", "kind", "label", "limit", "name", "notes", "over_by", "source", "status", "unit", "usage"} {
 		i := strings.Index(out, `"`+f+`":`)
 		if i < 0 || i < last {
@@ -195,10 +204,13 @@ func TestJSONKeepsGivenOrderAndAlphabeticalFields(t *testing.T) {
 // text, so numbers are compared exactly as written.
 func decode(t *testing.T, data []byte) []map[string]string {
 	t.Helper()
-	var raw []map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
+	var env struct {
+		Readings []map[string]json.RawMessage `json:"readings"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s", err, data)
 	}
+	raw := env.Readings
 	rows := make([]map[string]string, len(raw))
 	for i, r := range raw {
 		rows[i] = map[string]string{}
@@ -213,8 +225,8 @@ func TestWriteTableContextLine(t *testing.T) {
 	rows := []model.LimitReading{measured("tasks", 100, 95)}
 	render := func(ctx string) []string {
 		var buf bytes.Buffer
-		if err := WriteTableContext(&buf, rows, 90, ctx); err != nil {
-			t.Fatalf("WriteTableContext: %v", err)
+		if err := WriteTable(&buf, rows, 90, TableOptions{Context: ctx}); err != nil {
+			t.Fatalf("WriteTable: %v", err)
 		}
 		return strings.Split(buf.String(), "\n")
 	}
@@ -229,10 +241,10 @@ func TestWriteTableContextLine(t *testing.T) {
 
 	// An empty context prints nothing, which is exactly what WriteTable does.
 	var plain, empty bytes.Buffer
-	if err := WriteTable(&plain, rows, 90); err != nil {
+	if err := WriteTable(&plain, rows, 90, TableOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteTableContext(&empty, rows, 90, ""); err != nil {
+	if err := WriteTable(&empty, rows, 90, TableOptions{Context: ""}); err != nil {
 		t.Fatal(err)
 	}
 	if plain.String() != empty.String() || strings.Contains(plain.String(), "unit:") {

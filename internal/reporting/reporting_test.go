@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/mabunemeh/limits-explain/internal/model"
+	"github.com/mabunemeh/limits-explain/internal/sources/systemd"
 )
 
 func reading(overrides func(*model.LimitReading)) model.LimitReading {
@@ -30,7 +31,7 @@ func reading(overrides func(*model.LimitReading)) model.LimitReading {
 func table(t *testing.T, readings ...model.LimitReading) string {
 	t.Helper()
 	var buf bytes.Buffer
-	if err := WriteTable(&buf, readings, 90); err != nil {
+	if err := WriteTable(&buf, readings, 90, TableOptions{}); err != nil {
 		t.Fatalf("WriteTable: %v", err)
 	}
 	return buf.String()
@@ -236,10 +237,10 @@ type failWriter struct{}
 func (failWriter) Write([]byte) (int, error) { return 0, errors.New("disk full") }
 
 func TestWritersReportWriteErrors(t *testing.T) {
-	if err := WriteTable(failWriter{}, nil, 90); err == nil || !strings.Contains(err.Error(), "disk full") {
+	if err := WriteTable(failWriter{}, nil, 90, TableOptions{}); err == nil || !strings.Contains(err.Error(), "disk full") {
 		t.Errorf("WriteTable error = %v", err)
 	}
-	if err := WriteJSON(failWriter{}, nil); err == nil || !strings.Contains(err.Error(), "disk full") {
+	if err := WriteJSON(failWriter{}, nil, JSONOptions{}); err == nil || !strings.Contains(err.Error(), "disk full") {
 		t.Errorf("WriteJSON error = %v", err)
 	}
 }
@@ -254,42 +255,59 @@ func TestJSONShape(t *testing.T) {
 		reading(func(r *model.LimitReading) {
 			r.Key, r.Kind, r.Limit, r.Status = "rlimit.fsize.hard", model.KindHard, model.UnknownAmount(), model.StatusUnlimited
 		}),
-	})
+	}, JSONOptions{PID: 4242, Warn: 90, Unit: systemd.Outcome{Reason: "systemd is not consulted"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
 
-	want := `[
-  {
-    "headroom": null,
-    "key": "rlimit.fsize.soft",
-    "kind": "soft",
-    "label": "open files",
-    "limit": 18446744073709551614,
-    "name": "open files (soft)",
-    "notes": "",
-    "over_by": null,
-    "source": "rlimit",
-    "status": "unmeasured",
-    "unit": "files",
-    "usage": null
+	// Nothing is measured and there is no unit, so summary.nearest,
+	// unit.name are null; the reason is set.
+	want := `{
+  "pid": 4242,
+  "readings": [
+    {
+      "headroom": null,
+      "key": "rlimit.fsize.soft",
+      "kind": "soft",
+      "label": "open files",
+      "limit": 18446744073709551614,
+      "name": "open files (soft)",
+      "notes": "",
+      "over_by": null,
+      "source": "rlimit",
+      "status": "unmeasured",
+      "unit": "files",
+      "usage": null
+    },
+    {
+      "headroom": null,
+      "key": "rlimit.fsize.hard",
+      "kind": "hard",
+      "label": "open files",
+      "limit": null,
+      "name": "open files (hard)",
+      "notes": "",
+      "over_by": null,
+      "source": "rlimit",
+      "status": "unlimited",
+      "unit": "files",
+      "usage": null
+    }
+  ],
+  "summary": {
+    "nearest": null,
+    "not_measured": 1,
+    "total": 2,
+    "warned": 0
   },
-  {
-    "headroom": null,
-    "key": "rlimit.fsize.hard",
-    "kind": "hard",
-    "label": "open files",
-    "limit": null,
-    "name": "open files (hard)",
-    "notes": "",
-    "over_by": null,
-    "source": "rlimit",
-    "status": "unlimited",
-    "unit": "files",
-    "usage": null
-  }
-]
+  "unit": {
+    "directives_read": false,
+    "name": null,
+    "reason": "systemd is not consulted"
+  },
+  "warn": 90
+}
 `
 	if out != want {
 		t.Errorf("json mismatch\n got:\n%s\nwant:\n%s", out, want)
@@ -299,14 +317,66 @@ func TestJSONShape(t *testing.T) {
 	}
 }
 
-func TestJSONEmptyIsArrayNotNull(t *testing.T) {
+func TestJSONEnvelopeSummaryAndUnit(t *testing.T) {
+	// The nearest ceiling is the first row, so its key is the one reported.
+	rows := []model.LimitReading{measured("tasks", 100, 95), measured("memory", 100, 10), reading(nil)}
+	rows[0].Key = "cgroup.pids.max"
+	tests := []struct {
+		name string
+		unit systemd.Outcome
+		want string // the summary and unit blocks, then warn
+	}{
+		{"unit read", systemd.Outcome{Unit: "a.service"}, `  "summary": {
+    "nearest": "cgroup.pids.max",
+    "not_measured": 1,
+    "total": 3,
+    "warned": 1
+  },
+  "unit": {
+    "directives_read": true,
+    "name": "a.service",
+    "reason": null
+  },
+  "warn": 90
+}
+`},
+		{"unit found, directives failed", systemd.Outcome{Unit: "a.service", Failed: true}, `  "summary": {
+    "nearest": "cgroup.pids.max",
+    "not_measured": 1,
+    "total": 3,
+    "warned": 1
+  },
+  "unit": {
+    "directives_read": false,
+    "name": "a.service",
+    "reason": null
+  },
+  "warn": 90
+}
+`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := WriteJSON(&buf, rows, JSONOptions{PID: 1, Warn: 90, Unit: tc.unit}); err != nil {
+				t.Fatal(err)
+			}
+			_, got, ok := strings.Cut(buf.String(), "  ],\n")
+			if !ok || got != tc.want {
+				t.Errorf("tail mismatch\n got:\n%s\nwant:\n%s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestJSONEmptyReadingsIsArrayNotNull(t *testing.T) {
 	for _, in := range [][]model.LimitReading{nil, {}} {
 		var buf bytes.Buffer
-		if err := WriteJSON(&buf, in); err != nil {
+		if err := WriteJSON(&buf, in, JSONOptions{PID: 7, Warn: 80}); err != nil {
 			t.Fatal(err)
 		}
-		if buf.String() != "[]\n" {
-			t.Errorf("WriteJSON(%v) = %q, want %q", in, buf.String(), "[]\n")
+		if want := `"readings": [],`; !strings.Contains(buf.String(), want) {
+			t.Errorf("WriteJSON(%v) = %q, want it to contain %q", in, buf.String(), want)
 		}
 	}
 }
@@ -314,13 +384,17 @@ func TestJSONEmptyIsArrayNotNull(t *testing.T) {
 func TestJSONKeepsControlCharsAsEscapesAndHTMLReadable(t *testing.T) {
 	var buf bytes.Buffer
 	label := "a<b>&\x1b\t\"q\""
-	if err := WriteJSON(&buf, []model.LimitReading{reading(func(r *model.LimitReading) { r.Label = label })}); err != nil {
+	err := WriteJSON(&buf, []model.LimitReading{reading(func(r *model.LimitReading) { r.Label = label })}, JSONOptions{})
+	if err != nil {
 		t.Fatal(err)
 	}
-	var rows []map[string]any
-	if err := json.Unmarshal(buf.Bytes(), &rows); err != nil {
+	var env struct {
+		Readings []map[string]any `json:"readings"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s", err, buf.String())
 	}
+	rows := env.Readings
 	// JSON round-trips the raw string exactly; sanitising is a terminal
 	// concern and does not apply here.
 	if rows[0]["label"] != label {

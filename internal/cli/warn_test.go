@@ -112,7 +112,7 @@ func TestExitOneOnAMeasuredReadingOverTheLimit(t *testing.T) {
 	lines := strings.Split(res.stdout, "\n")
 	wantHead := []string{
 		"limits-explain",
-		"nearest ceiling: memory 112.5% (1125 of 1000 bytes) (1 limit not measured)",
+		"nearest ceiling: memory 112.5% (1.0 KiB of 1000 B) (1 limit not measured)",
 		"warning: 2 readings at or above --warn 90%",
 	}
 	if !reflect.DeepEqual(lines[:3], wantHead) {
@@ -162,7 +162,7 @@ func TestPartialReportUnderTheThresholdExitsZeroAndNamesTheGap(t *testing.T) {
 	if res.code != 0 || res.stderr != "" {
 		t.Fatalf("exit %d, stderr %q", res.code, res.stderr)
 	}
-	want := "nearest ceiling: memory (high) 77.5% (620 of 800 bytes) (1 limit not measured)"
+	want := "nearest ceiling: memory (high) 77.5% (620 B of 800 B) (1 limit not measured)"
 	if got := headlineOf(t, res.stdout); got != want {
 		t.Errorf("headline = %q, want %q", got, want)
 	}
@@ -200,7 +200,7 @@ func TestUsageReadAtTheAncestorDecidesTheExit(t *testing.T) {
 	if res.code != 1 {
 		t.Fatalf("exit %d, want 1\n%s", res.code, res.stdout)
 	}
-	if got, want := headlineOf(t, res.stdout), "nearest ceiling: memory 90.0% (900 of 1000 bytes) (1 limit not measured)"; got != want {
+	if got, want := headlineOf(t, res.stdout), "nearest ceiling: memory 90.0% (900 B of 1000 B) (1 limit not measured)"; got != want {
 		t.Errorf("headline = %q, want %q", got, want)
 	}
 }

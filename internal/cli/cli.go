@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/mabunemeh/limits-explain/internal/model"
 	"github.com/mabunemeh/limits-explain/internal/ranking"
@@ -90,6 +91,29 @@ type rootOpener func(root string) fs.FS
 // rootOpener, so tests can inject a fake that replays captured output.
 type runnerOpener func(root string) systemd.Runner
 
+// widthFunc reports the terminal width in columns of the stream the table is
+// written to, or 0 when it is not a terminal or the width is unknown. It is
+// a parameter, like rootOpener, so tests can set any width without a TTY.
+type widthFunc func(w io.Writer) int
+
+// terminalWidth is the real widthFunc: it answers only for an *os.File that
+// is a terminal, so piped and redirected output is never truncated.
+func terminalWidth(w io.Writer) int {
+	f, ok := w.(*os.File)
+	if !ok {
+		return 0
+	}
+	fd := int(f.Fd()) //nolint:gosec // file descriptors fit in int
+	if !term.IsTerminal(fd) {
+		return 0
+	}
+	width, _, err := term.GetSize(fd)
+	if err != nil || width <= 0 {
+		return 0
+	}
+	return width
+}
+
 // Execute runs the CLI with the given arguments (without the program name),
 // writing results to stdout and errors to stderr, and returns the exit code.
 //
@@ -128,16 +152,18 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 				return systemd.ExecRunner{}
 			}
 			return nil
-		})
+		},
+		terminalWidth)
 }
 
-func execute(args []string, stdout, stderr io.Writer, open rootOpener, runner runnerOpener) int {
+func execute(args []string, stdout, stderr io.Writer, open rootOpener, runner runnerOpener,
+	width widthFunc) int {
 	if args == nil {
 		// cobra falls back to os.Args[1:] for a nil slice. An empty,
 		// non-nil slice means "no arguments".
 		args = []string{}
 	}
-	cmd := newRootCmd(stdout, stderr, open, runner)
+	cmd := newRootCmd(stdout, stderr, open, runner, width)
 	cmd.SetArgs(args)
 
 	err := cmd.Execute()
@@ -161,7 +187,7 @@ func execute(args []string, stdout, stderr io.Writer, open rootOpener, runner ru
 	return code
 }
 
-func newRootCmd(stdout, stderr io.Writer, open rootOpener, runner runnerOpener) *cobra.Command {
+func newRootCmd(stdout, stderr io.Writer, open rootOpener, runner runnerOpener, width widthFunc) *cobra.Command {
 	root := &cobra.Command{
 		Use:   progName,
 		Short: "Show every limit binding a Linux process",
@@ -178,7 +204,7 @@ func newRootCmd(stdout, stderr io.Writer, open rootOpener, runner runnerOpener) 
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	root.CompletionOptions.DisableDefaultCmd = true
-	root.AddCommand(newShowCmd(stdout, open, runner))
+	root.AddCommand(newShowCmd(stdout, open, runner, width))
 	return root
 }
 
@@ -187,12 +213,13 @@ type showOptions struct {
 	json bool
 	warn string
 	unit string
+	wide bool
 }
 
 // defaultWarn is the --warn percentage when the flag is not given.
 const defaultWarn = "90"
 
-func newShowCmd(stdout io.Writer, open rootOpener, runner runnerOpener) *cobra.Command {
+func newShowCmd(stdout io.Writer, open rootOpener, runner runnerOpener, width widthFunc) *cobra.Command {
 	var opts showOptions
 
 	cmd := &cobra.Command{
@@ -230,7 +257,17 @@ Exit codes:
   4  the results could not be written (for example a full disk); this wins
      over 1
 
-Readings are ranked nearest ceiling first.`,
+Readings are ranked nearest ceiling first.
+
+Table: amounts with the unit "bytes" are shown as B or KiB..EiB with one
+decimal, rounded down (JSON keeps exact integers). On a terminal the Notes
+column is cut to fit its width, ending in "...", and a last line says so;
+--wide shows it in full. Piped output is never cut.
+
+--json prints one object with the keys pid, readings (every reading, exact
+integers, null for unknown amounts), summary (nearest: the key of the
+nearest-ceiling reading or null; not_measured, total, warned), unit
+(directives_read; name and reason, null when not applicable) and warn.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 1 {
 				return fmt.Errorf("expected one pid, got %d arguments", len(args))
@@ -270,9 +307,14 @@ Readings are ranked nearest ceiling first.`,
 					return &exitError{exitTarget, err}
 				}
 			}
-			return runShow(stdout, fsys, opts.root, pid, opts.json, warn, run)
+			cols := 0
+			if !opts.json && !opts.wide {
+				cols = width(stdout)
+			}
+			return runShow(stdout, fsys, opts.root, pid, opts.json, warn, run, cols)
 		},
 	}
+	cmd.Flags().BoolVar(&opts.wide, "wide", false, "show the Notes column in full instead of cutting it to the terminal width")
 	cmd.Flags().StringVar(&opts.unit, "unit", "", "show the main process of the systemd unit `NAME` instead of a pid")
 	cmd.Flags().BoolVar(&opts.json, "json", false, "print machine-readable JSON instead of a table")
 	// A string flag, not cobra's Uint: pflag parses integers with base 0, so
@@ -315,7 +357,7 @@ func parseWarn(arg string) (uint64, error) {
 }
 
 func runShow(stdout io.Writer, fsys fs.FS, rootLabel string, pid int, asJSON bool, warn uint64,
-	run systemd.Runner) error {
+	run systemd.Runner, cols int) error {
 	// The existence check uses the same fs.FS the sources read through, so a
 	// fixture tree and the real filesystem behave identically.
 	pidDir := fmt.Sprintf("proc/%d", pid)
@@ -379,9 +421,9 @@ func runShow(stdout io.Writer, fsys fs.FS, rootLabel string, pid int, asJSON boo
 	// leaves partial output on stdout.
 	ranked := ranking.Rank(readings)
 	if asJSON {
-		err = reporting.WriteJSON(stdout, ranked)
+		err = reporting.WriteJSON(stdout, ranked, reporting.JSONOptions{PID: pid, Warn: warn, Unit: unitCtx})
 	} else {
-		err = reporting.WriteTableContext(stdout, ranked, warn, unitCtx.Line())
+		err = reporting.WriteTable(stdout, ranked, warn, reporting.TableOptions{Width: cols, Context: unitCtx.Line()})
 	}
 	// A render failure wins over the threshold: the caller must learn the
 	// report did not arrive before they learn what it said.

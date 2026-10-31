@@ -144,12 +144,14 @@ func show(args ...string) (int, string, string) {
 
 func notesByKey(t *testing.T, stdout string) map[string]string {
 	t.Helper()
-	var rows []map[string]any
-	if err := json.Unmarshal([]byte(stdout), &rows); err != nil {
-		t.Fatalf("stdout is not a JSON array: %v\n%s", err, stdout)
+	var env struct {
+		Readings []map[string]any `json:"readings"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &env); err != nil {
+		t.Fatalf("stdout is not the JSON envelope: %v\n%s", err, stdout)
 	}
 	notes := map[string]string{}
-	for _, row := range rows {
+	for _, row := range env.Readings {
 		key, _ := row["key"].(string)
 		notes[key], _ = row["notes"].(string)
 	}

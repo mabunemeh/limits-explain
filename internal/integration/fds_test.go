@@ -20,15 +20,17 @@ func TestCLIMeasuresOwnOpenFiles(t *testing.T) {
 	if code != 0 && code != 1 {
 		t.Fatalf("exit %d, stderr: %s\n%s", code, stderr, stdout)
 	}
-	var rows []struct {
-		Key    string  `json:"key"`
-		Status string  `json:"status"`
-		Usage  *uint64 `json:"usage"`
+	var env struct {
+		Readings []struct {
+			Key    string  `json:"key"`
+			Status string  `json:"status"`
+			Usage  *uint64 `json:"usage"`
+		} `json:"readings"`
 	}
-	if err := json.Unmarshal([]byte(stdout), &rows); err != nil {
-		t.Fatalf("stdout is not a JSON array: %v\n%s", err, stdout)
+	if err := json.Unmarshal([]byte(stdout), &env); err != nil {
+		t.Fatalf("stdout is not the JSON envelope: %v\n%s", err, stdout)
 	}
-	for _, r := range rows {
+	for _, r := range env.Readings {
 		if r.Key != "rlimit.nofile.soft" && r.Key != "rlimit.nofile.single" {
 			continue
 		}

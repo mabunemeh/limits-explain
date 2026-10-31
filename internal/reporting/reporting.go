@@ -6,13 +6,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/bits"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/mabunemeh/limits-explain/internal/model"
 	"github.com/mabunemeh/limits-explain/internal/ranking"
+	"github.com/mabunemeh/limits-explain/internal/sources/systemd"
 )
 
 // notAvailable is shown wherever a value is unknown.
@@ -67,11 +70,47 @@ func cell(s string) string {
 	return b.String()
 }
 
-func amountCell(a model.Amount) string {
+// unitBytes is the Unit value whose amounts the table humanizes.
+const unitBytes = "bytes"
+
+// iecUnits names the binary prefixes above plain bytes, in 1024 steps.
+var iecUnits = [...]string{"KiB", "MiB", "GiB", "TiB", "PiB", "EiB"}
+
+// humanBytes renders v for the table: "N B" under 1024, otherwise the largest
+// IEC unit that keeps the number at 1 or more, with one decimal.
+//
+// The decimal is FLOORED with exact integer math, never rounded, so a value
+// just under its limit can never print equal to the limit: the largest uint64
+// is "15.9 EiB", not "16.0 EiB". There is no float64 in here; it would lose
+// bits above 2^53.
+func humanBytes(v uint64) string {
+	if v < 1024 {
+		return strconv.FormatUint(v, 10) + " B"
+	}
+	// bits.Len64(v)-1 is the index of the top set bit and each unit is 10
+	// bits, so for v >= 1024 the shift is 10, 20, ... 60.
+	shift := uint((bits.Len64(v) - 1) / 10 * 10)
+	whole := v >> shift
+	rem := v & (1<<shift - 1)
+	// rem < 2^60, so rem*10 < 2^64: no overflow.
+	tenths := rem * 10 >> shift
+	return fmt.Sprintf("%d.%d %s", whole, tenths, iecUnits[shift/10-1])
+}
+
+// valueCell renders an exact value, humanized when the unit is bytes.
+func valueCell(v uint64, unit string) string {
+	if unit == unitBytes {
+		return humanBytes(v)
+	}
+	return strconv.FormatUint(v, 10)
+}
+
+// quantityCell renders a known-or-unknown amount of the given unit.
+func quantityCell(a model.Amount, unit string) string {
 	if !a.Known {
 		return notAvailable
 	}
-	return strconv.FormatUint(a.Value, 10)
+	return valueCell(a.Value, unit)
 }
 
 // limitCell renders the Limit column, distinguishing "no ceiling" from
@@ -86,7 +125,7 @@ func amountCell(a model.Amount) string {
 // was never observed.
 func limitCell(r model.LimitReading) string {
 	if r.Limit.Known {
-		return amountCell(r.Limit)
+		return quantityCell(r.Limit, r.Unit)
 	}
 	if r.Status == model.StatusUnlimited {
 		return string(model.StatusUnlimited)
@@ -94,18 +133,18 @@ func limitCell(r model.LimitReading) string {
 	return notAvailable
 }
 
-// headroomCell renders the Headroom column: n/a when unknown, the exact
-// remaining amount, or "over by N" when usage is past the limit. Exactly at
-// the limit is "0", not "over by 0".
+// headroomCell renders the Headroom column: n/a when unknown, the remaining
+// amount, or "over by N" when usage is past the limit. Exactly at the limit
+// is "0" (or "0 B" for bytes), not "over by 0".
 func headroomCell(r model.LimitReading) string {
 	remaining, overBy, ok := r.Headroom()
 	switch {
 	case !ok:
 		return notAvailable
 	case overBy > 0:
-		return "over by " + strconv.FormatUint(overBy, 10)
+		return "over by " + valueCell(overBy, r.Unit)
 	}
-	return strconv.FormatUint(remaining, 10)
+	return valueCell(remaining, r.Unit)
 }
 
 // usedCell renders the Used column, the floored percentage of the limit
@@ -137,8 +176,8 @@ func headline(s ranking.Summary) string {
 	case s.HasNearest:
 		n := s.Nearest
 		pct, _ := n.Percent() // measured by construction
-		detail := strconv.FormatUint(n.Usage.Value, 10) + " of " + strconv.FormatUint(n.Limit.Value, 10)
-		if n.Unit != "" {
+		detail := valueCell(n.Usage.Value, n.Unit) + " of " + valueCell(n.Limit.Value, n.Unit)
+		if n.Unit != "" && n.Unit != unitBytes {
 			detail += " " + n.Unit
 		}
 		return fmt.Sprintf("nearest ceiling: %s %s%% (%s)%s", cell(DisplayName(n)), cell(pct), cell(detail), gap)
@@ -160,25 +199,46 @@ func warnLine(s ranking.Summary, warn uint64) string {
 		s.Warned, plural(s.Warned, "reading", "readings"), warn)
 }
 
-// WriteTable renders readings, which the caller has already ranked, as an
-// aligned text table under a title line and the nearest-ceiling headline.
-// warn is the --warn percentage; it only decides whether the warning line
-// appears.
-func WriteTable(w io.Writer, readings []model.LimitReading, warn uint64) error {
-	return WriteTableContext(w, readings, warn, "")
+// TableOptions tunes [WriteTable].
+type TableOptions struct {
+	// Width is the terminal width in columns. Zero or less means unknown
+	// (output is piped, or the width could not be read): nothing is cut.
+	Width int
+	// Wide shows Notes in full even when Width is known.
+	Wide bool
+	// Context is one extra line, such as "unit: a.service", printed after
+	// the headline (and the warning line, when there is one) and before the
+	// table. Empty prints no line.
+	Context string
 }
 
-// WriteTableContext is [WriteTable] with one extra context line, such as
-// "unit: a.service", printed after the headline (and the warning line, when
-// there is one) and before the table. An empty context prints no line.
-func WriteTableContext(w io.Writer, readings []model.LimitReading, warn uint64, context string) error {
+// minNotesColumns is how much of a Notes cell survives truncation, even when
+// the line then overflows the terminal.
+const minNotesColumns = 10
+
+// ellipsis ends a truncated Notes cell. It is ASCII on purpose.
+const ellipsis = "..."
+
+// truncateRunes cuts s to at most limit runes, ending in "..." when it cut,
+// and reports whether it did. limit is at least minNotesColumns, so the
+// ellipsis always fits.
+func truncateRunes(s string, limit int) (string, bool) {
+	if utf8.RuneCountInString(s) <= limit {
+		return s, false
+	}
+	r := []rune(s)
+	return string(r[:limit-len(ellipsis)]) + ellipsis, true
+}
+
+// layout lays rows out as an aligned table and returns it with the trailing
+// padding trimmed from every line.
+func layout(rows [][]string) (string, error) {
 	var buf bytes.Buffer
 	tw := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
-
 	// Each row is written as tab-terminated cells. Every cell has already
 	// been through cell(), so the only tabs and newlines tabwriter sees are
 	// the ones added here.
-	row := func(cells ...string) {
+	for _, cells := range rows {
 		for _, c := range cells {
 			// tabwriter returns write errors only from the underlying
 			// writer, which is a bytes.Buffer here and cannot fail.
@@ -186,27 +246,76 @@ func WriteTableContext(w io.Writer, readings []model.LimitReading, warn uint64, 
 		}
 		_, _ = fmt.Fprintln(tw)
 	}
+	if err := tw.Flush(); err != nil {
+		return "", fmt.Errorf("render table: %w", err)
+	}
+	// Padding is added after every tab-terminated cell, including the last,
+	// so trim it rather than emit trailing whitespace on each line.
+	var out strings.Builder
+	for _, line := range strings.SplitAfter(buf.String(), "\n") {
+		out.WriteString(strings.TrimRight(line, " \n"))
+		if strings.HasSuffix(line, "\n") {
+			out.WriteString("\n")
+		}
+	}
+	return out.String(), nil
+}
 
-	row("Name", "Source", "Limit", "Usage", "Headroom", "Used", "Unit", "Status", "Notes")
+// WriteTable renders readings, which the caller has already ranked, as an
+// aligned text table under a title line and the nearest-ceiling headline.
+// warn is the --warn percentage; it only decides whether the warning line
+// appears.
+//
+// Byte amounts (Unit "bytes") are humanized in the Limit, Usage and Headroom
+// cells and in the headline; every other unit stays an exact integer.
+//
+// When opts.Width is known and opts.Wide is not set, only the Notes cells are
+// cut to fit, ending in "...", keeping at least 10 columns of notes even if
+// the line then overflows. Width is counted in runes after cell(). The
+// headline, warning and context lines are never cut. If anything was cut, a
+// last line says so, so hidden text is never silent.
+func WriteTable(w io.Writer, readings []model.LimitReading, warn uint64, opts TableOptions) error {
+	rows := make([][]string, 0, len(readings)+1)
+	rows = append(rows, []string{"Name", "Source", "Limit", "Usage", "Headroom", "Used", "Unit", "Status", "Notes"})
 	for _, r := range readings {
-		row(
+		rows = append(rows, []string{
 			cell(DisplayName(r)),
 			cell(r.Source),
 			cell(limitCell(r)),
-			cell(amountCell(r.Usage)),
+			cell(quantityCell(r.Usage, r.Unit)),
 			cell(headroomCell(r)),
 			cell(usedCell(r)),
 			cell(r.Unit),
 			cell(string(r.Status)),
 			cell(r.Notes),
-		)
+		})
 	}
-	if err := tw.Flush(); err != nil {
-		return fmt.Errorf("render table: %w", err)
+	table, err := layout(rows)
+	if err != nil {
+		return err
 	}
 
-	// Padding is added after every tab-terminated cell, including the last,
-	// so trim it rather than emit trailing whitespace on each line.
+	truncated := false
+	if opts.Width > 0 && !opts.Wide {
+		// Notes is the last column, so everything before it is the same
+		// width on every line: the header line minus its own "Notes".
+		// Cutting a Notes cell cannot move an earlier column.
+		header, _, _ := strings.Cut(table, "\n")
+		avail := max(opts.Width-(utf8.RuneCountInString(header)-len("Notes")), minNotesColumns)
+		for _, cells := range rows[1:] {
+			last := len(cells) - 1
+			var cut bool
+			if cells[last], cut = truncateRunes(cells[last], avail); cut {
+				truncated = true
+			}
+		}
+		if truncated {
+			if table, err = layout(rows); err != nil {
+				return err
+			}
+		}
+	}
+
 	var out strings.Builder
 	out.WriteString("limits-explain\n")
 	// The headline is built outside the tabwriter: it is prose, not a cell,
@@ -217,14 +326,12 @@ func WriteTableContext(w io.Writer, readings []model.LimitReading, warn uint64, 
 	if line := warnLine(sum, warn); line != "" {
 		out.WriteString(line + "\n")
 	}
-	if context != "" {
-		out.WriteString(cell(context) + "\n")
+	if opts.Context != "" {
+		out.WriteString(cell(opts.Context) + "\n")
 	}
-	for _, line := range strings.SplitAfter(buf.String(), "\n") {
-		out.WriteString(strings.TrimRight(line, " \n"))
-		if strings.HasSuffix(line, "\n") {
-			out.WriteString("\n")
-		}
+	out.WriteString(table)
+	if truncated {
+		fmt.Fprintf(&out, "notes truncated to fit %d columns; --wide shows them in full\n", opts.Width)
 	}
 	if _, err := io.WriteString(w, out.String()); err != nil {
 		return fmt.Errorf("write table: %w", err)
@@ -257,16 +364,61 @@ type jsonRow struct {
 	Usage    model.Amount `json:"usage"`
 }
 
+// jsonSummary is the headline numbers. Nearest is the Key of the measured
+// reading closest to its ceiling, or null when there is none.
+type jsonSummary struct {
+	Nearest     *string `json:"nearest"`
+	NotMeasured int     `json:"not_measured"`
+	Total       int     `json:"total"`
+	Warned      int     `json:"warned"`
+}
+
+// jsonUnit is what the systemd step found. Name is null without a unit and
+// Reason is null with one. DirectivesRead is false when there is no unit or
+// its directives could not be read.
+type jsonUnit struct {
+	DirectivesRead bool    `json:"directives_read"`
+	Name           *string `json:"name"`
+	Reason         *string `json:"reason"`
+}
+
+// jsonEnvelope is the top-level JSON document, keys in alphabetical order.
+type jsonEnvelope struct {
+	PID      int         `json:"pid"`
+	Readings []jsonRow   `json:"readings"`
+	Summary  jsonSummary `json:"summary"`
+	Unit     jsonUnit    `json:"unit"`
+	Warn     uint64      `json:"warn"`
+}
+
+// JSONOptions is the context [WriteJSON] wraps around the readings.
+type JSONOptions struct {
+	// PID is the process that was reported.
+	PID int
+	// Warn is the --warn percentage in force.
+	Warn uint64
+	// Unit is what the systemd step did.
+	Unit systemd.Outcome
+}
+
+// nonEmpty returns a pointer to s, or nil for "" so it renders as null.
+func nonEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
 // WriteJSON renders readings, in the order given (the CLI ranks them first),
-// as an indented JSON array followed by a newline, for machine consumption.
+// as an indented JSON envelope followed by a newline, for machine
+// consumption: {pid, readings, summary, unit, warn}.
 //
-// Each object carries every LimitReading field (including key, kind and
+// Each reading carries every LimitReading field (including key, kind and
 // label, not just the display name) plus name, so a consumer gets both the
 // structured identity and the human string without rebuilding it, and the
-// derived headroom and over_by. Unknown
-// amounts are null; known ones are exact integers. Empty input renders as
-// [], never null.
-func WriteJSON(w io.Writer, readings []model.LimitReading) error {
+// derived headroom and over_by. Unknown amounts are null; known ones are
+// exact integers, never humanized. No readings render as [], never null.
+func WriteJSON(w io.Writer, readings []model.LimitReading, opts JSONOptions) error {
 	rows := make([]jsonRow, 0, len(readings))
 	for _, r := range readings {
 		headroom, overBy := model.UnknownAmount(), model.UnknownAmount()
@@ -288,6 +440,26 @@ func WriteJSON(w io.Writer, readings []model.LimitReading) error {
 			Usage:    r.Usage,
 		})
 	}
+	sum := ranking.Summarize(readings, opts.Warn)
+	env := jsonEnvelope{
+		PID:      opts.PID,
+		Readings: rows,
+		Summary: jsonSummary{
+			NotMeasured: sum.NotMeasured,
+			Total:       sum.Total,
+			Warned:      sum.Warned,
+		},
+		Unit: jsonUnit{
+			DirectivesRead: opts.Unit.Unit != "" && !opts.Unit.Failed,
+			Name:           nonEmpty(opts.Unit.Unit),
+			Reason:         nonEmpty(opts.Unit.Reason),
+		},
+		Warn: opts.Warn,
+	}
+	if sum.HasNearest {
+		key := sum.Nearest.Key
+		env.Summary.Nearest = &key
+	}
 	// An Encoder (rather than MarshalIndent) so HTML escaping can be turned
 	// off: "<" and "&" in a kernel-derived label should stay readable, and
 	// JSON does not need them escaped. Encode also appends the trailing
@@ -295,7 +467,7 @@ func WriteJSON(w io.Writer, readings []model.LimitReading) error {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(rows); err != nil {
+	if err := enc.Encode(env); err != nil {
 		return fmt.Errorf("write json: %w", err)
 	}
 	return nil

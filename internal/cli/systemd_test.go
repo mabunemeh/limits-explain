@@ -54,7 +54,7 @@ func runWithRunner(runner systemd.Runner, args ...string) result {
 	var stdout, stderr bytes.Buffer
 	code := execute(args, &stdout, &stderr,
 		func(root string) fs.FS { return os.DirFS(root) },
-		func(string) systemd.Runner { return runner })
+		func(string) systemd.Runner { return runner }, noWidth)
 	return result{code, stdout.String(), stderr.String()}
 }
 
@@ -113,7 +113,7 @@ func TestShowPidNamesTheUnitAndAnnotates(t *testing.T) {
 
 // TestAnnotationsChangeNoRows checks the contract that systemd only adds
 // notes: the same rows, in the same order, with the same numbers and statuses,
-// whether or not systemd is consulted, and the JSON stays a bare array.
+// whether or not systemd is consulted.
 func TestAnnotationsChangeNoRows(t *testing.T) {
 	root := systemdRoot(t, "pids_overwritten")
 	plain := runWithRunner(nil, "show", "4242", "--json", "--root", root)
@@ -212,7 +212,7 @@ func TestShowUnit(t *testing.T) {
 	if len(r.asked) != 2 || r.asked[0] != "le-match.service" || r.asked[1] != "le-match.service" {
 		t.Errorf("asked %v", r.asked)
 	}
-	// --json works the same way and stays a bare array.
+	// --json works the same way.
 	js := runWithRunner(replayOf(t, "all_match"), "show", "--unit", "le-match.service", "--root", root, "--json")
 	if js.code != 0 || len(decodeJSON(t, js.stdout)) == 0 {
 		t.Errorf("--json: exit %d\n%s", js.code, js.stdout)

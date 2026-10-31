@@ -54,22 +54,39 @@ func TestShowTable(t *testing.T) {
 	}
 }
 
-// decodeJSON unmarshals stdout in full, failing if anything but one JSON
+// noWidth is the widthFunc of a pipe: the width is unknown.
+func noWidth(io.Writer) int { return 0 }
+
+// decodeEnvelope unmarshals stdout in full, failing if anything but one JSON
 // document is present. Numbers stay as json.Number so 64-bit values are not
 // rounded through float64.
-func decodeJSON(t *testing.T, stdout string) []map[string]any {
+func decodeEnvelope(t *testing.T, stdout string) map[string]any {
 	t.Helper()
 	dec := json.NewDecoder(strings.NewReader(stdout))
 	dec.UseNumber()
-	var rows []map[string]any
-	if err := dec.Decode(&rows); err != nil {
+	var env map[string]any
+	if err := dec.Decode(&env); err != nil {
 		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout)
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		t.Fatalf("stdout has content after the JSON document: %q", stdout)
 	}
-	if !strings.HasSuffix(stdout, "]\n") {
+	if !strings.HasSuffix(stdout, "}\n") {
 		t.Errorf("stdout does not end with a newline: %q", stdout)
+	}
+	return env
+}
+
+// decodeJSON returns the readings of the --json envelope.
+func decodeJSON(t *testing.T, stdout string) []map[string]any {
+	t.Helper()
+	raw, ok := decodeEnvelope(t, stdout)["readings"].([]any)
+	if !ok {
+		t.Fatalf("envelope has no readings array:\n%s", stdout)
+	}
+	rows := make([]map[string]any, len(raw))
+	for i, r := range raw {
+		rows[i], _ = r.(map[string]any)
 	}
 	return rows
 }
@@ -302,7 +319,7 @@ func TestProcessDyingBetweenStatAndReadExitsThree(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			open := func(root string) fs.FS { return failingFS{os.DirFS(root), tc.err} }
 			code := execute([]string{"show", "4242", "--root", fixtureRoot(t, "basic")}, &stdout, &stderr, open,
-				func(string) systemd.Runner { return nil })
+				func(string) systemd.Runner { return nil }, noWidth)
 			if code != 3 {
 				t.Errorf("exit %d, want 3", code)
 			}

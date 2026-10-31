@@ -14,9 +14,9 @@ func TestHiddenAncestorTripsWarn(t *testing.T) {
 		headline string
 	}{
 		{"usage_ancestor_tie",
-			"nearest ceiling: memory 95.0% (950 of 1000 bytes) (1 limit not measured)"},
+			"nearest ceiling: memory 95.0% (950 B of 1000 B) (1 limit not measured)"},
 		{"usage_ancestor_looser",
-			"nearest ceiling: memory 97.5% (1950 of 2000 bytes) (1 limit not measured)"},
+			"nearest ceiling: memory 97.5% (1.9 KiB of 1.9 KiB) (1 limit not measured)"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.fixture, func(t *testing.T) {
@@ -39,7 +39,7 @@ func TestRatioVersusHeadroomShowsTheParentAndNamesTheLeaf(t *testing.T) {
 	if res.code != 1 {
 		t.Fatalf("exit %d, want 1", res.code)
 	}
-	if got := strings.Split(res.stdout, "\n")[1]; got != "nearest ceiling: memory 90.0% (90000 of 100000 bytes) (1 limit not measured)" {
+	if got := strings.Split(res.stdout, "\n")[1]; got != "nearest ceiling: memory 90.0% (87.8 KiB of 97.6 KiB) (1 limit not measured)" {
 		t.Errorf("headline = %q", got)
 	}
 	if !strings.Contains(res.stdout, "least headroom: /a/b (500 bytes left)") {
