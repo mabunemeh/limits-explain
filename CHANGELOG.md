@@ -57,6 +57,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Tests, CI, docs and a capture script; no behaviour change.**
+  - `scripts/capture-fixture.sh <pid> <case> [unit]` (POSIX sh, run with
+    sudo) copies what the tool reads from a live host into a fixture tree.
+  - Real-host captures under `internal/cli/testdata/hosts/` are compared
+    against committed golden `--json` output and exit code by `TestHosts`;
+    `go test ./internal/cli -run Hosts -update` rewrites them. Three WSL
+    captures are included: a service with limits, a unit under a slice with a
+    tighter `TasksMax`, and a process outside systemd.
+  - The systemd integration tests now cover `TasksMax` reached (exit `1`),
+    `MemoryMax` with `MemoryHigh`, `CPUQuota`, `LimitNOFILE`, `LimitNPROC`, a
+    limit on an ancestor slice, and `--scope`. The CI job runs them on
+    `ubuntu-24.04` and `ubuntu-latest`.
+  - [docs/how-it-works.md](docs/how-it-works.md) explains where each number
+    comes from; the README is shortened to link to it.
 - **`--version`** prints `limits-explain <version>`. Release binaries are
   stamped with the tag; other builds report the version Go recorded (the
   module version for `go install ...@vX.Y.Z`, a commit pseudo-version for

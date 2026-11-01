@@ -35,34 +35,21 @@ stack size (soft)  rlimit  8.0 MiB    n/a        n/a        n/a    bytes      un
 notes truncated to fit 100 columns; --wide shows them in full
 ```
 
-On a terminal the Notes column is cut to fit (at least 10 columns are kept),
-and the last line says so; `--wide` shows it in full, and piped output is never
-cut. Byte amounts are shown as `B` or `KiB` to `EiB` with one decimal, rounded
-down, in the table only.
+On a terminal the Notes column is cut to fit (at least 10 columns are kept) and
+the last line says so; `--wide` shows it in full, and piped output is never cut.
+Byte amounts are shown as `B` or `KiB` to `EiB` with one decimal, rounded down,
+in the table only.
 
 Readings are ranked nearest ceiling first, then the limits that could not be
-measured, then the unlimited ones. Usage is read for the cgroup memory and
-task limits, at every level that has one, and for open files (the
-`/proc/<pid>/fd` count); the other rlimit rows count as not measured.
-`RLIMIT_NPROC` is per-user, so its rows carry a note with the thread count
-instead of usage. The headline names how many were not measured whenever any
-were, so a report is never an all-clear on its own. `--warn PERCENT` (default
-90, 1-100) sets the threshold for exit `1`.
+measured, then the unlimited ones. The headline counts the limits not measured,
+so a report is never an all-clear on its own. `--warn PERCENT` (default 90,
+1-100) sets the threshold for exit `1`. For a process in a system unit, its
+systemd directives are added to the Notes of the rows they set, and the `unit:`
+line names the unit or says why there is none.
 
-A cgroup row shows the level nearest its ceiling (by usage/limit, the
-rootmost on a tie), which can be an ancestor looser than the tightest limit,
-and says so in the Notes column:
-
-```text
-memory  cgroup  100000  90000  10000  90.0%  bytes  ok  nearest its ceiling: /a (sys/fs/cgroup/a/memory.max); usage read at /a (sys/fs/cgroup/a/memory.current), which counts its whole subtree; tightest ceiling: /a/b allows 1000; least headroom: /a/b (500 bytes left); ...
-```
-
-If any level's usage counter cannot be read the row stays unmeasured.
-
-For a process in a system unit, its systemd directives (`TasksMax`, `MemoryMax`,
-`MemoryHigh`, `CPUQuota`, `Limit<X>`) are added to the Notes of the rows they
-set, and say so when the kernel holds a different value; the `unit:` line names
-the unit or says why there is none.
+[docs/how-it-works.md](docs/how-it-works.md) says where each number comes from:
+the cgroup ancestor walk and which level a row shows, what is measured and what
+is not, the systemd notes, and how the fixtures are captured.
 
 `--json` prints one object, keys in alphabetical order:
 
@@ -111,9 +98,13 @@ configured directives.
 
 ```sh
 go test ./...                                       # unit tests against fixture trees
-go test -tags=integration ./internal/integration/   # needs systemd as PID 1
+go test -tags=integration ./internal/integration/   # needs systemd as PID 1 and sudo
 golangci-lint run
 ```
+
+Real-host fixtures live in `internal/cli/testdata/hosts/`. Capture one with
+`sudo sh scripts/capture-fixture.sh <pid> <case> [unit]`, copy it there, and run
+`go test ./internal/cli -run Hosts -update` to write its golden output.
 
 ## License
 
