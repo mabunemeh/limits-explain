@@ -1,0 +1,6 @@
+kernel: 6.18.54.1-microsoft-standard-WSL2
+systemd: systemd 259 (259.9-0ubuntu0.1)
+os: Ubuntu 26.04.1 LTS
+unit: none
+cgroup: /non-systemd
+unreadable: none

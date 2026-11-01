@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -114,24 +115,60 @@ func TestTransientUnitRlimitsAreReadable(t *testing.T) {
 	t.Errorf("no rlimit.nproc.* key among %d readings", len(readings))
 }
 
-// startUnit starts a transient unit with the given properties and returns its
-// MainPID. The unit is stopped when the test ends.
+// startUnit starts a transient `sleep 30` unit with the given properties and
+// returns its MainPID. The unit is stopped when the test ends.
 func startUnit(t *testing.T, name string, props ...string) int {
 	t.Helper()
+	return startUnitWith(t, name, nil, []string{"sleep", "30"}, props...)
+}
+
+// startUnitWith starts a transient service running command, with extra
+// systemd-run flags such as --slice=X and --property settings, and returns its
+// MainPID once the command has been exec'd. The unit is stopped when the test
+// ends.
+func startUnitWith(t *testing.T, name string, flags, command []string, props ...string) int {
+	t.Helper()
 	args := []string{"systemd-run", "--quiet", "--unit=" + name}
+	args = append(args, flags...)
 	for _, p := range props {
 		args = append(args, "--property="+p)
 	}
-	args = append(args, "sleep", "30")
+	args = append(args, command...)
 	if out, err := output("sudo", args...); err != nil {
 		t.Fatalf("systemd-run: %v\n%s", err, out)
 	}
-	t.Cleanup(func() {
-		if out, err := output("sudo", "systemctl", "stop", name); err != nil {
-			t.Logf("stopping %s: %v\n%s", name, err, out)
-		}
+	t.Cleanup(func() { stopUnit(t, name) })
+	pid := waitForMainPID(t, name)
+	waitFor(t, "pid "+strconv.Itoa(pid)+" to exec "+command[0], func() bool {
+		// MainPID is published when systemd forks, before the child has
+		// applied the unit's rlimits and exec'd, so reading /proc/<pid>/limits
+		// that early returns systemd's own values.
+		comm, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/comm")
+		return err == nil && strings.TrimSpace(string(comm)) == filepath.Base(command[0])
 	})
-	return waitForMainPID(t, name)
+	return pid
+}
+
+// stopUnit stops a unit or slice, logging rather than failing: cleanup must
+// not mask the test's own result.
+func stopUnit(t *testing.T, name string) {
+	t.Helper()
+	if out, err := output("sudo", "systemctl", "stop", name); err != nil {
+		t.Logf("stopping %s: %v\n%s", name, err, out)
+	}
+}
+
+// waitFor polls cond until it holds, failing the test after pollTimeout. The
+// tests never sleep for a fixed time and hope.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(mainPIDPollTimeout)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for %s", mainPIDPollTimeout, what)
+		}
+		time.Sleep(mainPIDPollInterval)
+	}
 }
 
 // show runs the in-process CLI against the live host: the default root, so the

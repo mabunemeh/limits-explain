@@ -78,10 +78,16 @@ jobs:
         run: CGO_ENABLED=0 GOOS=linux go build -o "${RUNNER_TEMP}/limits-explain" ./cmd/limits-explain
 
   systemd-integration:
-    # Not part of the OS matrix: this is a single spike job that proves
-    # ubuntu-latest runners are real VMs with systemd as PID 1 and cgroup v2,
-    # de-risking the future systemd source before it is built.
-    runs-on: ubuntu-latest
+    # Runs the integration tests (internal/integration) against a real systemd:
+    # transient units started with systemd-run and read back through the CLI.
+    # A pinned ubuntu-24.04 and whatever ubuntu-latest points to are both
+    # listed so a runner-image move cannot change what is tested unnoticed;
+    # the report step prints each leg's systemd version.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -90,18 +96,18 @@ jobs:
           go-version-file: go.mod
 
       - name: Guard -- fail loudly if PID 1 is not systemd
-        # The integration test below skips (green) when PID 1 is not systemd
-        # -- exactly the wrong failure mode for a spike whose whole point is
-        # proving the runner has systemd. This step fails the job outright
-        # instead of letting a runner-image change silently turn into a
-        # no-op skip that still shows green.
+        # The integration tests skip (green) when PID 1 is not systemd, which
+        # is exactly the wrong failure mode here: a runner-image change would
+        # silently turn the whole job into a no-op. This step fails the job
+        # outright instead.
         run: test "$(cat /proc/1/comm)" = systemd
 
       - name: Report systemd state
-        run: systemctl is-system-running || true
+        run: |
+          systemctl --version | head -1
+          systemctl is-system-running || true
 
-      - name: Run systemd integration test
-        # The test itself escalates via sudo for systemd-run and systemctl
-        # stop (passwordless sudo on GitHub-hosted runners); go test runs
-        # unprivileged.
+      - name: Run systemd integration tests
+        # The tests escalate via sudo for systemd-run and systemctl (passwordless
+        # sudo on GitHub-hosted runners); go test itself runs unprivileged.
         run: go test -tags=integration -v ./internal/integration/...
