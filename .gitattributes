@@ -8,6 +8,10 @@
 go.mod text eol=lf
 go.sum text eol=lf
 
+# Shell scripts run on Linux (often from this checkout via WSL), where a CR
+# breaks them.
+*.sh text eol=lf
+
 # ...except testdata directories: these are byte-exact captures (real
 # /proc/<pid>/limits output, including the kernel trailing padding spaces)
 # and hand-crafted fixtures whose exact bytes -- including a deliberate CRLF

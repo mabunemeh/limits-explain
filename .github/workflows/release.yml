@@ -26,10 +26,15 @@ jobs:
         # publishing anything.
         run: go test ./...
 
+      - name: Release notes
+        # The release body is this version's CHANGELOG.md section; a tag
+        # without one fails here, before anything is published.
+        run: sh scripts/release-notes.sh "${GITHUB_REF_NAME#v}" > "$RUNNER_TEMP/notes.md"
+
       - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --clean
+          args: release --clean --release-notes ${{ runner.temp }}/notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

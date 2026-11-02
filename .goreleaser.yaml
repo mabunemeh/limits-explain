@@ -25,9 +25,10 @@ archives:
 checksum:
   name_template: checksums.txt
 
-changelog:
-  # Release notes come from CHANGELOG.md, not from commit subjects.
-  disable: true
+# Release notes come from CHANGELOG.md, not from commit subjects: the workflow
+# passes scripts/release-notes.sh output as --release-notes. Do not set
+# changelog.disable, which skips the pipe that reads that file and leaves the
+# release body empty.
 
 release:
   # v0.1.0-rc.1 and similar tags are published as GitHub pre-releases.
