@@ -10,237 +10,92 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 First release.
 
-### Changed
-
-- **BREAKING: `--json` is now an object, not a bare array.** The old array is
-  under `readings` and is unchanged. New top-level keys, all alphabetical:
-  `pid`, `summary` (`nearest`: the `key` of the nearest-ceiling reading or
-  `null`; `not_measured`; `total`; `warned`), `unit` (`directives_read`;
-  `name` and `reason`, `null` when not applicable) and `warn`. Scripts that
-  indexed the top-level array must read `.readings` instead. Exit `3` still
-  prints nothing.
-- **Table: Notes are cut to the terminal width, and bytes are humanized.**
-  When stdout is a terminal, only the Notes cell is cut (ending in `...`, at
-  least 10 columns kept) and a last line says so; `--wide` shows them in full.
-  Piped output and `--json` are never cut. Limit, Usage and Headroom cells
-  (including `over by`) and the headline show `bytes` amounts as `B` or
-  `KiB` to `EiB` with one decimal, rounded down so a value below its limit
-  never prints equal to it. Other units, the Unit and Notes columns and the
-  JSON stay exact.
-- **The open-files rows are now measured**, so they rank, no longer count as
-  gaps in the headline, and can trip `--warn`. Scripts may see exit `1` where
-  they saw `0`: a process using 90% or more of its `RLIMIT_NOFILE` now exits
-  `1`.
-- **Exit `1` is now returned.** It means at least one MEASURED reading is at
-  or above `--warn` percent of its limit (default 90). The report is printed
-  first (table or `--json`) and a one-line message goes to stderr, with no
-  usage hint. Unmeasured limits neither trigger nor suppress it: a partial
-  report whose measured readings are all under the threshold still exits `0`,
-  and its headline names the gap, so exit `0` is never an all-clear on its
-  own. A failure to write the report (exit `4`) wins over `1`. Scripts that
-  treated every non-zero exit as "the tool broke" must now allow `1`.
-- **Table and JSON output changed shape.** The table gains Headroom and Used
-  columns after Usage, and a `nearest ceiling:` headline under the title
-  (plus a `warning:` line when something is at or above `--warn`). Rows are
-  now ranked rather than in collection order, in the table and in `--json`,
-  which gains `headroom` and `over_by` (exact integers, `null` when the
-  reading is not measured; `headroom` is `0` when usage is at or over the
-  limit). The JSON stays a bare array with alphabetical keys and no float
-  fields.
-- **A source that fails no longer hides the others.** Previously any source
-  failure ended the run with exit `3` and nothing on stdout; with a second
-  source that would mean a cgroup v1 host losing its rlimit report entirely.
-  Now a source that fails on its own is reported as a
-  `<source>.source_error` row carrying its status and the reason, the rest of
-  the report is printed, and the exit code is `0`. **Exit `0` therefore no
-  longer promises a complete report.** Exit `3` now means nothing could be
-  reported at all: the process does not exist, or *every* source failed, and
-  stdout stays empty. Anything scripted against the previous behaviour should check for
-  `source_error` rows (or `status` values of `unreadable` and `unparseable`)
-  rather than treating exit `0` as "every limit was read".
-
 ### Added
 
-- **Tests, CI, docs and a capture script; no behaviour change.**
-  - `scripts/capture-fixture.sh <pid> <case> [unit]` (POSIX sh, run with
-    sudo) copies what the tool reads from a live host into a fixture tree.
-  - Real-host captures under `internal/cli/testdata/hosts/` are compared
-    against committed golden `--json` output and exit code by `TestHosts`;
-    `go test ./internal/cli -run Hosts -update` rewrites them. Three WSL
-    captures are included: a service with limits, a unit under a slice with a
-    tighter `TasksMax`, and a process outside systemd.
-  - The systemd integration tests now cover `TasksMax` reached (exit `1`),
-    `MemoryMax` with `MemoryHigh`, `CPUQuota`, `LimitNOFILE`, `LimitNPROC`, a
-    limit on an ancestor slice, and `--scope`. The CI job runs them on
-    `ubuntu-24.04` and `ubuntu-latest`.
-  - [docs/how-it-works.md](docs/how-it-works.md) explains where each number
-    comes from; the README is shortened to link to it.
-- **`--version`** prints `limits-explain <version>`. Release binaries are
-  stamped with the tag; other builds report the version Go recorded (the
-  module version for `go install ...@vX.Y.Z`, a commit pseudo-version for
-  `go build` in a git checkout), or `dev` when there is none.
-- **Release pipeline.** Pushing a `v*` tag runs the tests, then goreleaser
-  publishes a GitHub release with static (`CGO_ENABLED=0`) linux amd64 and
-  arm64 tarballs and a `checksums.txt`. Tags with a pre-release suffix such as
-  `-rc.1` are marked as pre-releases.
-- **fd usage on the open-files rows** (`internal/sources/fds`, a pass that runs
-  after the other sources and before systemd). `rlimit.nofile.soft`, `.hard`
-  and `.single` get the number of entries in `/proc/<pid>/fd` as usage. The
-  directory is only listed, never opened per entry (entries are symlinks, and
-  `os.DirFS` follows them out of the root); any entry name that is not ASCII
-  digits fails closed, with no usage and a note. If fds are numbered at or
-  above the soft limit (`prlimit` can lower it below open fds) they are
-  counted and noted, since the count then overstates how close the next
-  `open()` is. An unlimited row is left untouched. An unreadable fd directory
-  (another user's process) is a note on the rows, which stay unmeasured, never
-  a `source_error` row.
-- **Thread notes.** The `rlimit.nproc` rows stay unmeasured: the limit is per
-  real uid across every task of that user, not per process, and a `/proc` scan
-  would undercount silently under `hidepid` or a PID namespace. Their note
-  gives the real uid and this process's thread count (from
-  `/proc/<pid>/status`, parsed strictly) and says it is not enforced for uid 0.
-  `cgroup.pids.max` gets a "this process has N threads" note.
-
-- **systemd source** (`internal/sources/systemd`): for a process in a system
-  unit, the unit's configured directives are added as NOTES on the rows they
-  set. It adds no rows and never changes a status, limit or usage, so ranking,
-  `--warn` and the gap count are unaffected. The unit is the rootmost
-  `.service` or `.scope` component of the process's cgroup path; a process
-  under `user@N.service` is not read, and neither are directives set on
-  ancestor slices. A directive that matches the kernel gets
-  `systemd: TasksMax=7 on a.service`; one that does not gets
-  `systemd: configured TasksMax=7 on a.service, effective 5`. Mapping:
-  `TasksMax` to `cgroup.pids.max`, `MemoryMax` to `cgroup.memory.max`,
-  `MemoryHigh` to `cgroup.memory.high`, `CPUQuotaPerSecUSec` to
-  `cgroup.cpu.max`, and `Limit<X>` / `Limit<X>Soft` to `rlimit.<x>.hard` /
-  `.soft` (or `.single` when soft and hard are equal, which then carries both
-  notes, merged into one when they agree).
-  - cgroup directives are compared with the kernel file at the UNIT's own
-    level, read through the same `fs.FS`, not with the level the row displays,
-    which can be an ancestor. `max` against a finite directive says
-    `effective max (not applied)`. `cpu.max` is compared exactly as
-    `directive_us * period == quota * 1_000_000` in 128 bits. systemd floors
-    the per-period quota to a whole microsecond (observed: `CPUQuota=33.33%`
-    with a 7ms period gives `2333 7000`), so a quota equal to
-    `floor(directive_us * period / 1_000_000)`, also computed in 128 bits, is
-    accepted with a note saying so. The kernel rounds `memory.max` and
-    `memory.high` DOWN to a whole page when they are written (observed:
-    10000001 became 9998336); a file value below the directive by less than a
-    page, for a page size (4 KiB, 16 KiB or 64 KiB) that divides it, is noted
-    as `consistent with rounding down to whole pages`, since the cause cannot
-    be checked from the files. A `.single` rlimit row whose soft and hard
-    directives are equal and both match gets one note, `(soft and hard)`.
-  - rlimits are compared with the row's limit, so `LimitNOFILE=infinity`
-    against the 2147483584 the kernel shows is reported as a mismatch.
-  - Numbers are all-ASCII-digit `uint64` or `infinity`; `CPUQuotaPerSecUSec` is
-    a space-separated timespan of `us`, `ms`, `s`, `min` and `h` tokens summed
-    to exact microseconds. A fraction that does not land on a whole
-    microsecond, an overflow, a sign, an exponent or any other form is
-    reported as `was not understood` and never guessed. A property this
-    systemd does not print is skipped silently.
-  - `systemctl show --no-pager -p <list> -- <unit>` is run with `LC_ALL=C`
-    and a 10 second timeout behind an injected `Runner`; nothing else is ever
-    executed and unit names are validated before any exec. Output is parsed
-    fail-closed: a line without `=`, a repeated key, or anything but
-    `LoadState=loaded` (a unit that does not exist exits 0 with default values)
-    fails the source, as does a `ControlGroup` that is neither the process's
-    cgroup nor an ancestor of it. A failure is one `systemd.source_error` row,
-    which counts as a gap like any other source's. No systemd as PID 1, or no
-    unit, is not an error and adds no row.
-  - The table gains one context line under the headline (and the warning
-    line): `unit: a.service`, `unit: a.service (directives not read)` or
-    `unit: none (<reason>)`. JSON is unchanged: a bare array of the same
-    objects. Under any `--root` other than `/` systemd is not consulted
-    (`unit: none (not consulted under --root)`).
-- **`show --unit NAME`**: resolves a unit to its main process and reports it
-  as `show <pid>` would. Exactly one of `<pid>` and `--unit` is required; the
-  name is validated first (letters, digits and `: _ . @ - \`, at most 255
-  bytes, never starting with `-`). Exit `2` for both or neither and for an
-  invalid name; exit `3` when systemd is not PID 1, the unit is not loaded
-  (`unit X not found`) or has no main process (`unit X has no main process`,
-  which includes scopes). Exit codes keep their meaning.
-- **Usage and headroom for memory and tasks.** The cgroup source now reads
-  `memory.current` (for `memory.max` and `memory.high`) and `pids.current`
-  (for `pids.max`), strictly parsed, at every level with a finite limit: each
-  level's limit is enforced against its own counter, which covers its whole
-  subtree. A missing, unreadable or unparseable counter at ANY finite level
-  leaves the reading `unmeasured` (with the tightest limit) and a note naming
-  each file and why, because the unknown level could be the one over the
-  threshold; usage is never guessed or borrowed. `cpu.max` and the rlimits
-  have no usage yet and stay unmeasured.
-- **Measured cgroup rows show the level nearest its ceiling.** The displayed
-  limit and usage come from the level with the highest exact usage/limit
-  (the rootmost on a tie), so a quiet leaf cannot hide an ancestor at 95%.
-  The notes name the tightest static ceiling when it is a different level,
-  and add `least headroom: <level> (<n> <unit> left)` when another level has
-  strictly less absolute headroom (the ratio still decides what is shown).
-- **Exact arithmetic.** Headroom never subtracts without comparing first, so
-  usage above the limit reports `over by N` instead of wrapping around. The
-  `--warn` check (`usage*100 >= percent*limit`) and the ranking comparison run
-  in 128 bits with no floating point, so they stay exact above 2^53 and near
-  2^64. A zero limit counts as fully consumed at any usage. The displayed
-  percentage is floored to a tenth, so a reading that did not trip `--warn 90`
-  never displays as `90.0%`.
-- **Ranking and headline.** Measured readings by consumed fraction, then the
-  readings that could not be measured, then the unlimited ones; ties keep
-  collection order. `nearest ceiling:` names the closest one and counts the
-  limits not measured.
-- **`--warn PERCENT`** (default 90, integer 1-100, plain decimal digits only:
-  hex, signs and fractions are usage errors, and `090` is 90, not octal).
-- **cgroup v2 source** (`internal/sources/cgroup`): resolves the process's
-  cgroup from `proc/<pid>/cgroup`, then walks UP the hierarchy and reports
-  the effective limit as the minimum across the leaf and every ancestor,
-  naming the level that actually binds and what the leaf alone would have
-  allowed. Covers `memory.max`, `pids.max` and `cpu.max` (derived to
-  millicores, with the raw quota/period pair in the notes), and reports
-  `memory.high` as a separate reading that says plainly it throttles and
-  reclaims rather than kills. `max` means unlimited, not a parse failure.
-  Values are exact `uint64`. A level whose controller file is absent is
-  skipped with a note (normal where a controller is not enabled); a level
-  that cannot be read or parsed withholds the limit for that one reading,
-  because the bad level could be the binding one. cgroup v1 and the hybrid
-  layout, a hierarchy not mounted at `sys/fs/cgroup`, a cgroup directory
-  that does not resolve under the mount, and a cgroup path containing `.`
-  or `..` are structural `SourceError`s that name what was found, never
-  numbers from the wrong hierarchy.
-- **rlimits source** (`internal/sources/rlimits`): reads `proc/<pid>/limits`,
-  emitting a soft and a hard reading when they differ or one `single`
-  reading when they match. Limits are exact `uint64` values, so the kernel
-  values above 2^63 (for example `RLIM_INFINITY - 1`) survive intact. Handles
-  the kernel's fixed-width column drift (a value that exactly fills its
-  field leaves no padding, dropping the usual 2+ space separator to one) on
-  either or both sides, accepts CRLF input, rejects indented rows and
-  anything but `unlimited` or ASCII digits as a value, keeps unknown kernel
-  row names under a slugified key, and degrades a single unparseable row to
-  a `status: unparseable` reading instead of aborting the whole read.
-  Structural problems (unreadable file, missing header, no data rows) are
-  returned as a `SourceError` that wraps the underlying read error, so
-  callers can use `errors.Is(err, fs.ErrPermission)` and
-  `errors.Is(err, fs.ErrNotExist)`.
-- **`limits-explain show <pid> [--json]`**: a table (`text/tabwriter`) or a
-  JSON array with a stable, alphabetical key order and `null` for unknown
-  values. Unknown limits render as `n/a`; only a reading the kernel reported
-  as unlimited renders as `unlimited`. Kernel-derived text is sanitised
-  before it reaches the table, so control characters cannot break the
-  layout or the terminal. Exit codes: `0` success, `2` usage error
-  (including a non-positive pid or an empty `--root`), `3` the process is
-  missing or its limits cannot be read, `4` the results could not be
-  written (exit `1` was reserved at this point and is now the `--warn` check).
-- **`fs.FS` testability seam**: every source reads through an `fs.FS`
-  rooted at `/` (or the hidden `--root`), with relative slash-separated
-  paths, so a source cannot name a path outside its root. That is a
-  guarantee about names, not reads: `os.DirFS` is not a sandbox and does
-  follow a symlink pointing out of the tree, so `os.OpenRoot` would be
-  needed if `--root` ever became a user-facing feature. Unit tests run
-  against committed fixture trees under `internal/sources/rlimits/testdata`
-  and `internal/sources/cgroup/testdata`, which are real kernel captures
-  plus hand-built edge cases, marked `-text` so Git never rewrites their
-  bytes.
-- **CI**: gofmt, `go vet`, golangci-lint, build and test with a coverage
-  floor of 80% on Linux (with the race detector) and Windows, a static
-  `CGO_ENABLED=0` Linux build, and a `systemd-integration` job that spawns a
-  transient unit with `systemd-run` on a GitHub Actions runner and reads its
-  real rlimits back, de-risking the future systemd source.
+- **`limits-explain show <pid>`** reports every limit binding a Linux
+  process, and **`show --unit NAME`** does the same for a systemd unit's main
+  process. Exactly one of the two is required. A unit name may contain
+  letters, digits and `: _ . @ - \`, at most 255 bytes, and must not start
+  with `-`.
+- **rlimits** from `/proc/<pid>/limits`: one `single` reading when soft and
+  hard are equal, otherwise a `soft` and a `hard` reading. Values are exact
+  `uint64`, so kernel values above 2^63 (such as `RLIM_INFINITY - 1`) are
+  kept intact. The parser handles the kernel's column drift when a value
+  fills its whole field, and accepts CRLF. Unknown row names are kept under
+  a slugified key. A row it cannot parse becomes an `unparseable` reading
+  instead of failing the whole file.
+- **cgroup v2 limits**: `memory.max`, `memory.high` (reported separately,
+  because it throttles and reclaims instead of killing), `pids.max`, and
+  `cpu.max` (in millicores, with the raw quota and period in the notes). The
+  process's cgroup is walked up to the root, and every level counts. A level
+  without the controller file is skipped with a note. A level that cannot be
+  read or parsed withholds that reading, since it could be the binding one.
+  cgroup v1, hybrid layouts and paths that do not resolve under
+  `/sys/fs/cgroup` are reported as errors, never as numbers from the wrong
+  hierarchy.
+- **Usage and headroom.** Memory and task limits are checked against each
+  level's own `memory.current` or `pids.current`. A row shows the level
+  nearest its ceiling, and the rootmost level wins a tie, so a quiet leaf
+  cannot hide a parent at 95%. Notes name the tightest static limit when it
+  is on a different level, and the level with the least absolute headroom
+  when that differs. If any level's counter cannot be read, the row is
+  `unmeasured`; usage is never guessed. Usage above the limit is shown as
+  `over by N`.
+- **Open files and threads.** The open-files rows count the entries in
+  `/proc/<pid>/fd`; that directory is only listed, never followed. An entry
+  name that is not all digits leaves the row unmeasured, with a note. The
+  `nproc` rows stay unmeasured, because the limit counts every task of the
+  user, not this process. Their note gives the real uid and this process's
+  thread count, and says the limit is not enforced for uid 0. `pids.max`
+  notes the thread count as well.
+- **systemd directives as notes.** For a process in a system unit,
+  directives such as `TasksMax`, `MemoryMax`, `MemoryHigh`, `CPUQuota` and
+  `Limit*` are added to the notes of the rows they set, with the effective
+  kernel value when it differs. Page rounding of memory limits and
+  whole-microsecond flooring of CPU quotas are recognised and said so.
+  Directives never add rows or change numbers. `systemctl show` is the only
+  command run, with `LC_ALL=C`, a 10 second timeout and a validated unit
+  name, and its output is parsed fail-closed. Processes under
+  `user@N.service` and directives on ancestor slices are not read.
+- **Ranking and `--warn`.** Readings are ordered by how close they are to
+  their limit, then the unmeasured ones, then the unlimited ones. A
+  `nearest ceiling:` headline names the closest reading and counts the
+  limits not measured, so a report never reads as an all-clear on its own.
+  `--warn PERCENT` (default 90, integer 1-100) sets the threshold for exit
+  `1`; unmeasured readings neither trigger nor suppress it. Comparisons are
+  exact 128-bit integer arithmetic with no floating point. The displayed
+  percentage is floored to a tenth, so a reading under the threshold never
+  shows as reaching it.
+- **Partial reports.** A source that fails on its own becomes one
+  `<source>.source_error` row with the reason, and the other sources are
+  still reported. Exit `0` therefore means a report was produced, not that
+  every limit was read.
+- **Table output**: kernel text is sanitised before it reaches the terminal.
+  Byte amounts are shown as `B` or `KiB` to `EiB` with one decimal, rounded
+  down. On a terminal the Notes column is cut to fit and a last line says
+  so; `--wide` shows it in full. Piped output is never cut. A `unit:` line
+  names the process's unit, or says why there is none.
+- **`--json`**: one object with alphabetical keys: `pid`, `readings`,
+  `summary` (`nearest`, `not_measured`, `total`, `warned`), `unit`
+  (`directives_read`, `name`, `reason`) and `warn`. Each reading carries
+  `key`, `kind`, `label`, `name`, `source`, `status`, `unit`, `notes`, and
+  `limit`, `usage`, `headroom` and `over_by` as exact integers or `null`.
+- **Exit codes**: `0` report produced, `1` a measured reading is at or above
+  `--warn`, `2` usage error, `3` nothing could be reported (no such process,
+  every source failed, or for `--unit`: systemd is not PID 1, or the unit
+  is not loaded or has no main process), `4` the output could not be
+  written (this wins over `1`).
+- **`--version`**, stamped with the tag in release builds.
+- **Releases**: static (`CGO_ENABLED=0`) linux amd64 and arm64 tarballs with
+  `checksums.txt`, built by goreleaser on each `v*` tag. The release notes
+  are this file's section for the tag.
+- **Tests and CI**: unit tests against fixture trees captured from real
+  kernels plus hand-built edge cases, golden `--json` output for real-host
+  captures (`scripts/capture-fixture.sh`), and `systemd-run` integration
+  tests on `ubuntu-24.04` and `ubuntu-latest`. CI runs gofmt, `go vet`,
+  golangci-lint, and the tests on Linux (with the race detector) and
+  Windows. [docs/how-it-works.md](docs/how-it-works.md) explains where each
+  number comes from.
 
 [Unreleased]: https://github.com/mabunemeh/limits-explain/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/mabunemeh/limits-explain/releases/tag/v0.1.0
