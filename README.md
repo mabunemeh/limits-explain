@@ -12,7 +12,9 @@ hierarchy, reporting which ancestor actually binds.
 go install github.com/mabunemeh/limits-explain/cmd/limits-explain@latest
 ```
 
-Requires Go 1.25 or newer.
+Requires Go 1.25 or newer. Static linux amd64 and arm64 binaries, with a
+`checksums.txt`, are attached to each
+[release](https://github.com/mabunemeh/limits-explain/releases).
 
 ## Usage
 

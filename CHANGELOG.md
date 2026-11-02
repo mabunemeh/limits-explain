@@ -6,6 +6,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-02
+
+First release.
+
 ### Changed
 
 - **BREAKING: `--json` is now an object, not a bare array.** The old array is
@@ -237,3 +241,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `CGO_ENABLED=0` Linux build, and a `systemd-integration` job that spawns a
   transient unit with `systemd-run` on a GitHub Actions runner and reads its
   real rlimits back, de-risking the future systemd source.
+
+[Unreleased]: https://github.com/mabunemeh/limits-explain/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/mabunemeh/limits-explain/releases/tag/v0.1.0
