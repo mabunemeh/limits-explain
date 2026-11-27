@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-27
+
 ### Security
 
 - Release binaries are now built with the latest stable Go. 0.1.0 was built
@@ -103,5 +105,6 @@ First release.
   Windows. [docs/how-it-works.md](docs/how-it-works.md) explains where each
   number comes from.
 
-[Unreleased]: https://github.com/mabunemeh/limits-explain/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/mabunemeh/limits-explain/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/mabunemeh/limits-explain/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/mabunemeh/limits-explain/releases/tag/v0.1.0
