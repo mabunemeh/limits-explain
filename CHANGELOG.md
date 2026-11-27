@@ -6,6 +6,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Updated `golang.org/x/term` to v0.45.0, `golang.org/x/sys` to v0.47.0
+  and `spf13/pflag` to v1.1.0. These are the newest versions that still
+  build with Go 1.25.
+
 ## [0.1.1] - 2026-11-27
 
 ### Security
