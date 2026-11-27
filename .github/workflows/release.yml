@@ -19,7 +19,10 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          # Not go-version-file: go.mod's `go` line is the oldest supported
+          # Go, which CI tests. Release binaries are built with the newest
+          # patched Go instead, so they carry its standard-library fixes.
+          go-version: stable
 
       - name: Test
         # A tag can be pushed on a commit CI never saw, so test before

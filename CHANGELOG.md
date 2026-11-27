@@ -6,6 +6,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- Release binaries are now built with the latest stable Go. 0.1.0 was built
+  with Go 1.25.0 and so shipped that version's unpatched standard library.
+  The minimum Go for building from source is unchanged (1.25).
+
 ## [0.1.0] - 2026-11-02
 
 First release.
